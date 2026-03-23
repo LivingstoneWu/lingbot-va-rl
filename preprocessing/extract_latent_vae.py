@@ -11,7 +11,10 @@ from PIL import Image
 import cv2
 from tqdm import tqdm
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from wan_va.configs import VA_CONFIGS
 from wan_va.modules.utils import load_vae, load_tokenizer, load_text_encoder
@@ -81,7 +84,7 @@ class WanVAEEncoder:
                     mu = enc_out
             else:
                 # 使用streaming_vae
-                from modules.utils import WanVAEStreamingWrapper
+                from wan_va.modules.utils import WanVAEStreamingWrapper
                 streaming_vae = WanVAEStreamingWrapper(self.vae)
                 enc_out = streaming_vae.encode_chunk(video)
                 mu, logvar = torch.chunk(enc_out, 2, dim=1)
