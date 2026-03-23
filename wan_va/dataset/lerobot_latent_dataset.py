@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader
 from scipy.spatial.transform import Rotation as R
 from lerobot.constants import HF_LEROBOT_HOME
 
+os.system('export WANDB_MODE=offline')
+
 def recursive_find_file(directory, filename='info.json'):
     result = []
     try:
@@ -47,8 +49,15 @@ def construct_lerobot_multi_processor(config,
     )
     repo_list = recursive_find_file(config.dataset_path, 'info.json')
     repo_list = [v.split('/meta/info.json')[0] for v in repo_list]
-    with Pool(num_init_worker) as pool:
-        datasets_out_lst = pool.map(construct_func, repo_list)
+    print('repo_list', len(repo_list))
+    ## 修改by lhc
+    # with Pool(num_init_worker) as pool:
+    #     datasets_out_lst = pool.map(construct_func, repo_list)
+    for repo in repo_list:
+        print("loading:", repo)
+        datasets_out_lst.append(construct_func(repo))
+    
+    print("len dataset out list", len(datasets_out_lst))
                 
     return datasets_out_lst
 
@@ -71,7 +80,7 @@ class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         config,
-        num_init_worker=128,
+        num_init_worker=1,
     ):
         self._datasets = construct_lerobot_multi_processor(config, 
                                                            num_init_worker, 
@@ -79,6 +88,7 @@ class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
         self.item_id_to_dataset_id, self.acc_dset_num = (
             self._get_item_id_to_dataset_id()
         )
+        print('finish')
 
     def __len__(
         self,
@@ -91,6 +101,7 @@ class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
         acc_nums = [0]
         id = 0
         for dset_id, dset in enumerate(self._datasets):
+            print("dset_id", dset_id, self._datasets)
             acc_nums.append(acc_nums[-1] + len(dset))
             for _ in range(len(dset)):
                 item_id_to_dataset_id[id] = dset_id
@@ -328,7 +339,8 @@ if __name__ == '__main__':
             dset,
             batch_size=1,
             shuffle=True,
-            num_workers=32,
+            #num_workers=32,
+            num_workers=0,
         )
     max_l = 0
     action_list = []

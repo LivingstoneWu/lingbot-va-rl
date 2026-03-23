@@ -1,0 +1,8 @@
+pick-n-place-sq-lerobot-v21
+datasets
+.vscode
+robochallenge
+core*
+__pycache__/
+*.py[cod]
+train_out

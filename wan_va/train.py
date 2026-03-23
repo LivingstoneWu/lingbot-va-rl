@@ -46,6 +46,10 @@ from utils import (
 from dataset import MultiLatentLeRobotDataset
 import gc
 
+from contextlib import nullcontext
+import setproctitle
+setproctitle.setproctitle('lingbot_lhc')
+
 
 class Trainer:
     def __init__(self, config):
