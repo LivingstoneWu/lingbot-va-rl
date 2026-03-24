@@ -15,8 +15,8 @@ from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # 配置常量
-HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
-RAW_DATASET_NAMES = ["put_pen_into_pencil_case_trim"]  # 请修改为实际数据集名称
+HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
+RAW_DATASET_NAMES = ["scan_QR_code_trim_stage2_test"]  # 请修改为实际数据集名称
 PUSH_TO_HUB = False
 
 class EpisodeStateFiles:
@@ -434,22 +434,26 @@ def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[
                 # 获取原始数据
                 left_eef_state_raw = np.array(left_data[index].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
                 left_eef_action_raw = np.array(left_data[index + 1].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
-                left_joints_state_raw = np.array(left_data[index].get('joint_positions', np.zeros(7)), dtype=np.float32)
-                left_joints_action_raw = np.array(left_data[index + 1].get('joint_positions', np.zeros(7)), dtype=np.float32)
+                left_joints_state_raw = np.array(left_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
+                left_joints_action_raw = np.array(left_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
                 left_gripper_state = float(left_data[index].get('gripper', 0.0))
                 left_gripper_action = float(left_data[index + 1].get('gripper', 0.0))
                 
                 # 处理关节维度（如果是6维，padding为7）
-                left_eef_state = pad_joint_dimension(left_eef_state_raw)
-                left_eef_action = pad_joint_dimension(left_eef_action_raw)
-                left_joints_state = pad_joint_dimension(left_joints_state_raw)
-                left_joints_action = pad_joint_dimension(left_joints_action_raw)
+                # left_eef_state = pad_joint_dimension(left_eef_state_raw)
+                # left_eef_action = pad_joint_dimension(left_eef_action_raw)
+                # left_joints_state = pad_joint_dimension(left_joints_state_raw)
+                # left_joints_action = pad_joint_dimension(left_joints_action_raw)
+                left_eef_state = left_eef_state_raw
+                left_eef_action = left_eef_action_raw
+                left_joints_state = left_joints_state_raw
+                left_joints_action = left_joints_action_raw
             else:
                 left_eef_state = np.zeros(7, dtype=np.float32)
                 left_eef_action = np.zeros(7, dtype=np.float32)
-                left_joints_state = np.zeros(7, dtype=np.float32)
+                left_joints_state = np.zeros(6, dtype=np.float32)
                 left_gripper_state = 0.0
-                left_joints_action = np.zeros(7, dtype=np.float32)
+                left_joints_action = np.zeros(6, dtype=np.float32)
                 left_gripper_action = 0.0
             
             # 处理右侧数据
@@ -457,22 +461,26 @@ def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[
                 # 获取原始数据
                 right_eef_state_raw = np.array(right_data[index].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
                 right_eef_action_raw = np.array(right_data[index + 1].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
-                right_joints_state_raw = np.array(right_data[index].get('joint_positions', np.zeros(7)), dtype=np.float32)
-                right_joints_action_raw = np.array(right_data[index + 1].get('joint_positions', np.zeros(7)), dtype=np.float32)
+                right_joints_state_raw = np.array(right_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
+                right_joints_action_raw = np.array(right_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
                 right_gripper_state = float(right_data[index].get('gripper', 0.0))
                 right_gripper_action = float(right_data[index + 1].get('gripper', 0.0))
                 
                 # 处理关节维度（如果是6维，padding为7）
-                right_eef_state = pad_joint_dimension(right_eef_state_raw)
-                right_eef_action = pad_joint_dimension(right_eef_action_raw)
-                right_joints_state = pad_joint_dimension(right_joints_state_raw)
-                right_joints_action = pad_joint_dimension(right_joints_action_raw)
+                # right_eef_state = pad_joint_dimension(right_eef_state_raw)
+                # right_eef_action = pad_joint_dimension(right_eef_action_raw)
+                # right_joints_state = pad_joint_dimension(right_joints_state_raw)
+                # right_joints_action = pad_joint_dimension(right_joints_action_raw)
+                right_eef_state = right_eef_state_raw
+                right_eef_action = right_eef_action_raw
+                right_joints_state = right_joints_state_raw
+                right_joints_action = right_joints_action_raw
             else:
                 right_eef_state = np.zeros(7, dtype=np.float32)
                 right_eef_action = np.zeros(7, dtype=np.float32)
-                right_joints_state = np.zeros(7, dtype=np.float32)
+                right_joints_state = np.zeros(6, dtype=np.float32)
                 right_gripper_state = 0.0
-                right_joints_action = np.zeros(7, dtype=np.float32)
+                right_joints_action = np.zeros(6, dtype=np.float32)
                 right_gripper_action = 0.0
             
             # 合并状态和动作
@@ -584,22 +592,26 @@ def process_episode_with_frames(episode: EpisodeStateFiles, global_task_info: Op
                 # 获取原始数据
                 left_eef_state_raw = np.array(left_data[index].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
                 left_eef_action_raw = np.array(left_data[index + 1].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
-                left_joints_state_raw = np.array(left_data[index].get('joint_positions', np.zeros(7)), dtype=np.float32)
-                left_joints_action_raw = np.array(left_data[index + 1].get('joint_positions', np.zeros(7)), dtype=np.float32)
+                left_joints_state_raw = np.array(left_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
+                left_joints_action_raw = np.array(left_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
                 left_gripper_state = float(left_data[index].get('gripper', 0.0))
                 left_gripper_action = float(left_data[index + 1].get('gripper', 0.0))
                 
                 # 处理关节维度（如果是6维，padding为7）
-                left_eef_state = pad_joint_dimension(left_eef_state_raw)
-                left_eef_action = pad_joint_dimension(left_eef_action_raw)
-                left_joints_state = pad_joint_dimension(left_joints_state_raw)
-                left_joints_action = pad_joint_dimension(left_joints_action_raw)
+                # left_eef_state = pad_joint_dimension(left_eef_state_raw)
+                # left_eef_action = pad_joint_dimension(left_eef_action_raw)
+                # left_joints_state = pad_joint_dimension(left_joints_state_raw)
+                # left_joints_action = pad_joint_dimension(left_joints_action_raw)
+                left_eef_state = left_eef_state_raw
+                left_eef_action = left_eef_action_raw
+                left_joints_state = left_joints_state_raw
+                left_joints_action = left_joints_action_raw
             else:
                 left_eef_state = np.zeros(7, dtype=np.float32)
                 left_eef_action = np.zeros(7, dtype=np.float32)
-                left_joints_state = np.zeros(7, dtype=np.float32)
+                left_joints_state = np.zeros(6, dtype=np.float32)
                 left_gripper_state = 0.0
-                left_joints_action = np.zeros(7, dtype=np.float32)
+                left_joints_action = np.zeros(6, dtype=np.float32)
                 left_gripper_action = 0.0
             
             # 处理右侧数据
@@ -607,22 +619,26 @@ def process_episode_with_frames(episode: EpisodeStateFiles, global_task_info: Op
                 # 获取原始数据
                 right_eef_state_raw = np.array(right_data[index].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
                 right_eef_action_raw = np.array(right_data[index + 1].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
-                right_joints_state_raw = np.array(right_data[index].get('joint_positions', np.zeros(7)), dtype=np.float32)
-                right_joints_action_raw = np.array(right_data[index + 1].get('joint_positions', np.zeros(7)), dtype=np.float32)
+                right_joints_state_raw = np.array(right_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
+                right_joints_action_raw = np.array(right_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
                 right_gripper_state = float(right_data[index].get('gripper', 0.0))
                 right_gripper_action = float(right_data[index + 1].get('gripper', 0.0))
                 
                 # 处理关节维度（如果是6维，padding为7）
-                right_eef_state = pad_joint_dimension(right_eef_state_raw)
-                right_eef_action = pad_joint_dimension(right_eef_action_raw)
-                right_joints_state = pad_joint_dimension(right_joints_state_raw)
-                right_joints_action = pad_joint_dimension(right_joints_action_raw)
+                # right_eef_state = pad_joint_dimension(right_eef_state_raw)
+                # right_eef_action = pad_joint_dimension(right_eef_action_raw)
+                # right_joints_state = pad_joint_dimension(right_joints_state_raw)
+                # right_joints_action = pad_joint_dimension(right_joints_action_raw)
+                right_eef_state = right_eef_state_raw
+                right_eef_action = right_eef_action_raw
+                right_joints_state = right_joints_state_raw
+                right_joints_action = right_joints_action_raw
             else:
                 right_eef_state = np.zeros(7, dtype=np.float32)
                 right_eef_action = np.zeros(7, dtype=np.float32)
-                right_joints_state = np.zeros(7, dtype=np.float32)
+                right_joints_state = np.zeros(6, dtype=np.float32)
                 right_gripper_state = 0.0
-                right_joints_action = np.zeros(7, dtype=np.float32)
+                right_joints_action = np.zeros(6, dtype=np.float32)
                 right_gripper_action = 0.0
             
             # 合并状态和动作
@@ -713,10 +729,10 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
         num_episodes: 处理的episode数量，None表示全部
     """
     # 清理输出目录
-    os.system("export HF_LEROBOT_HOME='/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge'")
+    os.system("export HF_LEROBOT_HOME='/liujinxin/code/lhc/lingbot-va/datasets/robochallenge'")
     output_path = HF_LEROBOT_HOME / repo_name
-    # if output_path.exists():
-    #     shutil.rmtree(output_path)
+    if output_path.exists():
+        shutil.rmtree(output_path)
     
     # 设置缓存
     cache_path = os.path.join(data_dir, "cache")
@@ -784,12 +800,12 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (30,),
+                "shape": (28,),
                 "names": ["motors"],
             },
             "action": {
                 "dtype": "float32",
-                "shape": (30,),
+                "shape": (28,),
                 "names": ["motors"],
             },
         },
@@ -857,7 +873,7 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
         print("\n使用快速模式（仅状态和动作）...")
     
     # 使用多进程加速处理
-    num_processes = min(cpu_count(), 80)  # 使用CPU核心数，最多80个
+    num_processes = min(cpu_count(), 24)  # 使用CPU核心数，最多12个
     print(f"使用 {num_processes} 个进程并行处理...")
     
     # 准备参数
