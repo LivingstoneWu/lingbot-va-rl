@@ -15,8 +15,8 @@ from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # 配置常量
-HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
-RAW_DATASET_NAMES = ["turn_on_faucet_trim"]  # 请修改为实际数据集名称
+HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
+RAW_DATASET_NAMES = ["put_pen_into_pencil_case_trim"]  # 请修改为实际数据集名称
 PUSH_TO_HUB = False
 
 class EpisodeStateFiles:
@@ -713,7 +713,7 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
         num_episodes: 处理的episode数量，None表示全部
     """
     # 清理输出目录
-    os.system("export HF_LEROBOT_HOME='/liujinxin/code/lhc/lingbot-va/datasets/robochallenge'")
+    os.system("export HF_LEROBOT_HOME='/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge'")
     output_path = HF_LEROBOT_HOME / repo_name
     # if output_path.exists():
     #     shutil.rmtree(output_path)
@@ -857,7 +857,7 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
         print("\n使用快速模式（仅状态和动作）...")
     
     # 使用多进程加速处理
-    num_processes = min(cpu_count(), 24)  # 使用CPU核心数，最多12个
+    num_processes = min(cpu_count(), 80)  # 使用CPU核心数，最多80个
     print(f"使用 {num_processes} 个进程并行处理...")
     
     # 准备参数

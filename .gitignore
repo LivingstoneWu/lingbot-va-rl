@@ -6,3 +6,4 @@ core*
 __pycache__/
 *.py[cod]
 train_out
+*.gz
