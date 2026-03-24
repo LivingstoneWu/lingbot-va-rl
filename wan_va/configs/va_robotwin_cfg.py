@@ -30,6 +30,9 @@ va_robotwin_cfg.action_num_inference_steps = 50
 va_robotwin_cfg.snr_shift = 5.0
 va_robotwin_cfg.action_snr_shift = 1.0
 
+
+# COMMENT: inverse_used_action_channel_ids maps the 30 action dimensions to the indices of the used action channels. 
+# COMMENT: not used ones are mapped to len(used_ids), or action_dim + 1, facilitating later padding.
 va_robotwin_cfg.used_action_channel_ids = list(range(0, 7)) + list(
     range(28, 29)) + list(range(7, 14)) + list(range(29, 30))
 inverse_used_action_channel_ids = [

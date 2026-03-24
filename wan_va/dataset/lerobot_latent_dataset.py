@@ -281,8 +281,8 @@ class LatentLeRobotDataset(LeRobotDataset):
         action_mask = np.ones_like(action, dtype='bool')
         assert action.shape[0] == required_action_num
 
-
-        action_paded = np.pad(action, ((0, 0), (0, 1)), mode='constant', constant_values=0)
+        # COMMENT: incoming action: original shape, no padding; inverse_used_action_channel_ids: dim=30, each mapping to the index of the 
+        # COMMENT: corresponding channel in the original action, not used channels points to action_dim + 1, here would be the additional padded 0 dimension.
         action_mask_padded = np.pad(action_mask, ((0, 0), (0, 1)), mode='constant', constant_values=0)
 
         action_aligned = action_paded[:, self.config.inverse_used_action_channel_ids]
