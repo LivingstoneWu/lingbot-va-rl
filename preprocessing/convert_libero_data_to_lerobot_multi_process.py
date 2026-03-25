@@ -15,9 +15,11 @@ from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # 配置常量
-HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
-RAW_DATASET_NAMES = ["scan_QR_code_trim_stage2_test"]  # 请修改为实际数据集名称
+HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
+RAW_DATASET_NAMES = ["put_pen_into_pencil_case_trim"]  # 请修改为实际数据集名称, original dataset name
 PUSH_TO_HUB = False
+PROCESS_BATCH_SIZE=80
+NUM_WORKERS=80
 
 class EpisodeStateFiles:
     """表示一个episode的左右状态文件和相关资源"""
@@ -873,7 +875,7 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
         print("\n使用快速模式（仅状态和动作）...")
     
     # 使用多进程加速处理
-    num_processes = min(cpu_count(), 24)  # 使用CPU核心数，最多12个
+    num_processes = min(cpu_count(), NUM_WORKERS)  # 使用CPU核心数，最多12个
     print(f"使用 {num_processes} 个进程并行处理...")
     
     # 准备参数
@@ -885,7 +887,7 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
     
     with Pool(processes=num_processes) as pool:
         # 分批处理以避免内存溢出
-        batch_size = 50
+        batch_size = PROCESS_BATCH_SIZE
         for i in range(0, len(process_args), batch_size):
             batch_args = process_args[i:i+batch_size]
             batch_start_time = time.time()
@@ -912,6 +914,7 @@ def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episode
                     }
                     
                     # 如果有视频帧，添加到frame_dict
+                    # COMMENT: the video names are hardcoded, added here
                     if include_frames and 'frames' in frame_data:
                         frame_dict['observation.images.top'] = frame_data['frames'].get('cam_high')
                         frame_dict['observation.images.left_wrist'] = frame_data['frames'].get('cam_wrist_left')
