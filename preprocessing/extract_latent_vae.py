@@ -114,6 +114,53 @@ class WanVAEEncoder:
             latent = latent.cpu()
             
         return latent, C, F_lat, H_lat, W_lat
+
+    def encode_video_batch(self, video_tensors):
+        """
+        批量编码视频tensor列表（要求每个tensor形状一致）
+
+        Args:
+            video_tensors: list of tensors, each [3, F, H, W]
+
+        Returns:
+            list of (latent, C, F_lat, H_lat, W_lat)
+        """
+        if len(video_tensors) == 0:
+            return []
+        if len(video_tensors) == 1:
+            return [self.encode_video(video_tensors[0])]
+
+        with torch.no_grad():
+            videos = torch.stack(video_tensors, dim=0).to(self.device)  # [B, 3, F, H, W]
+
+            if hasattr(self.vae, 'encode'):
+                enc_out = self.vae.encode(videos)
+                if hasattr(enc_out, 'latent_dist'):
+                    mu = enc_out.latent_dist.mean
+                elif isinstance(enc_out, tuple):
+                    mu, _ = enc_out
+                else:
+                    mu = enc_out
+            else:
+                from wan_va.modules.utils import WanVAEStreamingWrapper
+                streaming_vae = WanVAEStreamingWrapper(self.vae)
+                enc_out = streaming_vae.encode_chunk(videos)
+                mu, _ = torch.chunk(enc_out, 2, dim=1)
+
+            if not isinstance(mu, torch.Tensor):
+                raise TypeError(f"Expected mu to be torch.Tensor, got {type(mu)}")
+
+            latents_mean = self.latents_mean.to(mu.device)
+            latents_std = self.latents_std.to(mu.device)
+            mu_norm = self.normalize_latents(mu, latents_mean, 1.0 / latents_std)  # [B, C, F, H, W]
+
+            B, C, F_lat, H_lat, W_lat = mu_norm.shape
+            results = []
+            for b in range(B):
+                latent = mu_norm[b].permute(1, 2, 3, 0).contiguous().view(-1, C).cpu()
+                results.append((latent, C, F_lat, H_lat, W_lat))
+
+        return results
     
 
 class VideoProcessor:
@@ -336,7 +383,7 @@ def load_metadata(meta_path):
 
 
 def process_episode(video_processor, vae_encoder, tokenizer, text_encoder,
-                    video_path, text, episode_id, save_dir, device, chunk_size=450):
+                    video_path, text, episode_id, save_dir, device, chunk_size=450, batch_size=1):
     """
     处理单个episode：采样帧 -> 分块 -> 编码 -> 保存多个chunk文件
     
@@ -369,49 +416,70 @@ def process_episode(video_processor, vae_encoder, tokenizer, text_encoder,
         with torch.no_grad():
             text_emb = extract_text_embeddings(text, tokenizer, text_encoder, device)
     
-    # Step 4: 处理每个chunk
-    for chunk_idx, (chunk_frames, chunk_frame_ids, start_idx, end_idx) in enumerate(chunks):
+    # Step 4: 先转tensor，再按相同帧长做小批量VAE编码
+    prepared_chunks = []
+    for chunk_frames, chunk_frame_ids, start_idx, end_idx in chunks:
         if len(chunk_frames) == 0:
             continue
-        
-        # 转换为tensor
         video_tensor = video_processor.frames_to_tensor(chunk_frames)  # [3, F, H, W]
-        
-        # VAE编码
-        latent, C, F_lat, H_lat, W_lat = vae_encoder.encode_video(video_tensor)  # [C, F_lat, H_lat, W_lat]
-        
-        # 准备保存的数据
-        latent_num_frames = F_lat 
-        
-        # 计算全局帧ID范围
-        global_start_frame = chunk_frame_ids[0]
-        global_end_frame = chunk_frame_ids[-1] + 1
-        
-        save_data = {
-            'latent': latent,  #[7936, 48]
-            'latent_num_frames': latent_num_frames, #31
-            'latent_height': H_lat, #16
-            'latent_width': W_lat, #16
-            'video_num_frames': len(chunk_frames), #121
-            'video_height': metadata['height'], #256
-            'video_width': metadata['width'], #256
-            'text_emb': text_emb.squeeze(0), #[512, 4096]
-            'text': text,
-            'frame_ids': chunk_frame_ids, # (121)
-            'start_frame': global_start_frame, #0
-            'end_frame': global_end_frame, #245
-            'fps': metadata['target_fps'], 
-            'ori_fps': metadata['orig_fps'],
-        }
-        
-        # 保存文件: episode_{index}_{start_frame}_{end_frame}.pth
-        save_filename = f'episode_{episode_id:06d}_{global_start_frame}_{global_end_frame}.pth'
-        save_path = save_dir / save_filename
-        torch.save(save_data, save_path)
-        
-        logger.info(f"Saved {save_path}")
-        logger.info(f"  Video frames: {len(chunk_frames)} -> Latent frames: {latent_num_frames}")
-        logger.info(f"  Frame range: {global_start_frame} - {global_end_frame}")
+        prepared_chunks.append({
+            "video_tensor": video_tensor,
+            "chunk_frames": chunk_frames,
+            "chunk_frame_ids": chunk_frame_ids,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+        })
+
+    i = 0
+    effective_batch_size = max(1, int(batch_size))
+    while i < len(prepared_chunks):
+        current_f = prepared_chunks[i]["video_tensor"].shape[1]
+        batch_items = [prepared_chunks[i]]
+        j = i + 1
+        while (
+            j < len(prepared_chunks)
+            and len(batch_items) < effective_batch_size
+            and prepared_chunks[j]["video_tensor"].shape[1] == current_f
+        ):
+            batch_items.append(prepared_chunks[j])
+            j += 1
+
+        latents_info = vae_encoder.encode_video_batch([item["video_tensor"] for item in batch_items])
+
+        for item, (latent, C, F_lat, H_lat, W_lat) in zip(batch_items, latents_info):
+            chunk_frames = item["chunk_frames"]
+            chunk_frame_ids = item["chunk_frame_ids"]
+            latent_num_frames = F_lat
+
+            global_start_frame = chunk_frame_ids[0]
+            global_end_frame = chunk_frame_ids[-1] + 1
+
+            save_data = {
+                'latent': latent,
+                'latent_num_frames': latent_num_frames,
+                'latent_height': H_lat,
+                'latent_width': W_lat,
+                'video_num_frames': len(chunk_frames),
+                'video_height': metadata['height'],
+                'video_width': metadata['width'],
+                'text_emb': text_emb.squeeze(0) if text_emb is not None else None,
+                'text': text,
+                'frame_ids': chunk_frame_ids,
+                'start_frame': global_start_frame,
+                'end_frame': global_end_frame,
+                'fps': metadata['target_fps'],
+                'ori_fps': metadata['orig_fps'],
+            }
+
+            save_filename = f'episode_{episode_id:06d}_{global_start_frame}_{global_end_frame}.pth'
+            save_path = save_dir / save_filename
+            torch.save(save_data, save_path)
+
+            logger.info(f"Saved {save_path}")
+            logger.info(f"  Video frames: {len(chunk_frames)} -> Latent frames: {latent_num_frames}")
+            logger.info(f"  Frame range: {global_start_frame} - {global_end_frame}")
+
+        i = j
     
     return len(chunks)
 
@@ -473,6 +541,12 @@ def main():
         default=0,
         help="Local rank"
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="VAE encode batch size (chunks with same frame length are batched)"
+    )
     
     args = parser.parse_args()
     
@@ -485,8 +559,12 @@ def main():
     
     # 获取配置
     config = VA_CONFIGS[args.config_name]
-    config.local_rank = args.local_rank
-    device = torch.device(f"cuda:{args.local_rank}")
+    env_local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    config.local_rank = env_local_rank
+    device = torch.device(f"cuda:{env_local_rank}")
+    logger.info(f"Distributed shard: rank={rank}, world_size={world_size}, local_rank={env_local_rank}")
     
     # 初始化组件
     logger.info("Initializing VAE encoder...")
@@ -537,63 +615,58 @@ def main():
     
     logger.info(f"Found {len(chunk_dirs)} chunks to process")
     
-    total_episodes = 0
-    total_chunks = 0
-    
+    # 展平任务列表后按 rank 切分，避免多GPU重复处理同一文件
+    all_jobs = []
     for chunk_dir in chunk_dirs:
         chunk_id = chunk_dir.name.replace('chunk-', '')
-        logger.info(f"Processing chunk {chunk_id}")
-        
         for camera_key in args.camera_keys:
-            # 视频目录: videos/chunk-{chunk_id}/observation.images.{camera_key}/
             video_camera_dir = chunk_dir / f'observation.images.{camera_key}'
-            
             if not video_camera_dir.exists():
                 logger.warning(f"Camera directory not found: {video_camera_dir}")
                 continue
-            
-            # 查找所有mp4文件
             mp4_files = sorted(video_camera_dir.glob('episode_*.mp4'))
             logger.info(f"Found {len(mp4_files)} mp4 files in {video_camera_dir}")
-            
             for mp4_file in mp4_files:
-                # 从文件名提取episode_id
-                # 文件名格式: episode_000000.mp4
-                episode_name = mp4_file.stem  # episode_000000
-                episode_id = int(episode_name.replace('episode_', ''))
-                
-                # 从metadata获取text
-                text = ""
-                if str(episode_id) in episode_metadata:
-                    meta = episode_metadata[str(episode_id)]
-                    text = meta.get('tasks', '')
-                else:
-                    logger.warning(f"No metadata found for episode {episode_id}")
-                
-                # 创建保存目录: latents/chunk-{chunk_id}/observation.images.{camera_key}/
-                save_camera_dir = latents_dir / f'chunk-{chunk_id}' / f'observation.images.{camera_key}'
-                save_camera_dir.mkdir(parents=True, exist_ok=True)
-                
-                # 处理这个episode
-                num_chunks = process_episode(
-                    video_processor=video_processor,
-                    vae_encoder=vae_encoder,
-                    tokenizer=tokenizer,
-                    text_encoder=text_encoder,
-                    video_path=str(mp4_file),
-                    text=text,
-                    episode_id=episode_id,
-                    save_dir=save_camera_dir,
-                    device=device,
-                    chunk_size=args.chunk_size
-                )
-                
-                if num_chunks:
-                    total_episodes += 1
-                    total_chunks += num_chunks
-                
-                # 清理GPU缓存
-                torch.cuda.empty_cache()
+                all_jobs.append((chunk_id, camera_key, mp4_file))
+
+    jobs = all_jobs[rank::world_size]
+    logger.info(f"Total jobs: {len(all_jobs)} | Jobs for this rank: {len(jobs)}")
+
+    total_episodes = 0
+    total_chunks = 0
+    for chunk_id, camera_key, mp4_file in jobs:
+        episode_name = mp4_file.stem
+        episode_id = int(episode_name.replace('episode_', ''))
+
+        text = ""
+        if str(episode_id) in episode_metadata:
+            meta = episode_metadata[str(episode_id)]
+            text = meta.get('tasks', '')
+        else:
+            logger.warning(f"No metadata found for episode {episode_id}")
+
+        save_camera_dir = latents_dir / f'chunk-{chunk_id}' / f'observation.images.{camera_key}'
+        save_camera_dir.mkdir(parents=True, exist_ok=True)
+
+        num_chunks = process_episode(
+            video_processor=video_processor,
+            vae_encoder=vae_encoder,
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            video_path=str(mp4_file),
+            text=text,
+            episode_id=episode_id,
+            save_dir=save_camera_dir,
+            device=device,
+            chunk_size=args.chunk_size,
+            batch_size=args.batch_size,
+        )
+
+        if num_chunks:
+            total_episodes += 1
+            total_chunks += num_chunks
+
+        torch.cuda.empty_cache()
     
     logger.info(f"Latent extraction completed! Processed {total_episodes} episodes, {total_chunks} chunks")
 
