@@ -34,7 +34,7 @@ def process_episodes_file(input_file: str, output_file: str):
 
 def main():
     """主函数"""
-    base_dir = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/put_pen_into_pencil_case_trim/meta"
+    base_dir = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/put_pen_into_pencil_case/meta"
     input_file = os.path.join(base_dir, "episodes.jsonl")
     backup_file = os.path.join(base_dir, "episodes_ori.jsonl")
     output_file = os.path.join(base_dir, "episodes_new.jsonl")

@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 NPROC_PER_NODE=8
-BATCH_SIZE="4
+BATCH_SIZE=160
 
 if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
   torchrun --nproc_per_node "${NPROC_PER_NODE}" "${SCRIPT_DIR}/extract_latent_vae.py" \

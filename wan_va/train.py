@@ -47,8 +47,8 @@ from dataset import MultiLatentLeRobotDataset
 import gc
 
 from contextlib import nullcontext
-import setproctitle
-setproctitle.setproctitle('lingbot_lhc')
+# import setproctitle
+# setproctitle.setproctitle('lingbot_lhc')
 
 
 class Trainer:

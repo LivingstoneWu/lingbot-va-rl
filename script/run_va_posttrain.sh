@@ -3,14 +3,17 @@
 set -x
 
 umask 007
+
+cd /liujinxin/code/lhc/wy/wms/lingbot-va
+source /liujinxin/conda3/bin/activate wy-lingbotva
  
-NGPU=${NGPU:-"2"}
-MASTER_PORT=${MASTER_PORT:-"29501"}
-PORT=${PORT:-"1106"}
+NGPU=${NGPU:-"3"}
+MASTER_PORT=${MASTER_PORT:-"29502"}
+PORT=${PORT:-"1107"}
 LOG_RANK=${LOG_RANK:-"0"}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 # CONFIG_NAME=${CONFIG_NAME:-"robotwin_train"}
-CONFIG_NAME=${CONFIG_NAME:-"demo_train"}
+CONFIG_NAME=${CONFIG_NAME:-"rc_aloha_pencil_case_train"}
 
 overrides=""
 if [ $# -ne 0 ]; then
@@ -28,6 +31,8 @@ master_port=${MASTER_PORT}
 log_rank=${LOG_RANK}
 torchft_lighthouse=${TORCHFT_LIGHTHOUSE}
 config_name=${CONFIG_NAME}
+
+export CUDA_VISIBLE_DEVICES=5,6,7
 
 ## cmd setting
 export TOKENIZERS_PARALLELISM=false
