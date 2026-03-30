@@ -253,7 +253,7 @@ class Trainer:
     def convert_input_format(self, input_dict):
         """Convert input dict to match transformer input format if needed."""
         for key, value in input_dict.items():
-            input_dict[key] = value.to(self.device)#.to(self.dtype)
+            input_dict[key] = value.to(self.device).to(self.dtype)
         return input_dict
 
     def compute_loss(self,

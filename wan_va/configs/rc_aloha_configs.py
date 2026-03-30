@@ -36,7 +36,7 @@ rc_aloha_base_config.action_snr_shift = 1.0
 
 # COMMENT: inverse_used_action_channel_ids maps the 30 action dimensions to the indices of the used action channels. 
 # COMMENT: not used ones are mapped to len(used_ids), or action_dim + 1, facilitating later padding.
-rc_aloha_base_config.used_action_channel_ids = list(range(0, 13)) + list(range(14, 19)) + list(range(21, 26)) + list(range(29, 30))
+rc_aloha_base_config.used_action_channel_ids = list(range(0, 20)) + list(range(21,27)) + list(range(28, 30))
 inverse_used_action_channel_ids = [
     len(rc_aloha_base_config.used_action_channel_ids)
 ] * rc_aloha_base_config.action_dim
@@ -49,19 +49,9 @@ rc_aloha_base_config.inverse_used_action_channel_ids = inverse_used_action_chann
 rc_aloha_pencil_case_config_train = EasyDict(__name__='Config: RC ALOHA pencil case')
 rc_aloha_pencil_case_config_train.update(rc_aloha_base_config)
 rc_aloha_pencil_case_config_train.action_norm_method = 'quantiles'
-rc_aloha_pencil_case_config_train.norm_stat={
-    "q01": [
-  6.0679424e-01, -2.2940049e-01, -9.8167383e-04,  2.0655010e-02,
- -3.4262955e-03,  1.4843845e-01, -5.4128927e-01,  6.0194373e-01,
- -2.8486153e-02,  1.7661544e-02, -4.3897825e-01, -5.7565200e-04,
- -1.3499714e+00, -9.2118275e-01, -1.3456075e-01, -1.9396822e-01,
- -6.7752495e-02, -4.3610000e-04, -1.5347406e+00, -7.7800237e-02,
- -1.5706578e-01, -1.9508148e+00, -7.9999998e-04, -3.4000000e-03],
-    "q99": [0.34181964, 0.00465323, 0.42854595, 0.72929543, 0.87002546, 0.12560092,
- 0.7821621, 0.34912562, 0.32544464, 0.431879, 0.19072197, 0.98466605,
- 0.5185191, 0.74653405, 0.20242018, 1.8691595, 0.00655894, 0.16404338,
- 1.1954024, 1.844075, 0.7347064, 2.1204753, 0.00905344, 1.7361141,
- 1.1046064, 0.29474035, 0.0599, 0.0677]
+rc_aloha_pencil_case_config_train.norm_stat = {
+    "q01": [0.031551607, -0.14152533, 0.15114924, -0.083684184, 0.6086638, -0.23346399, 0.0018790263, 0.022730829, -0.0038374024, 0.1484917, -0.54672539, 0.60530323, -0.030355122, -0.15870552, 0.018053232, -0.43822816, -0.000627984, -1.3246624, -0.90175295, -0.15870552, -0.15870552, -0.1313882, -0.19809407, -0.072915919, -0.00045354399, -1.5296671, -0.15870552, -0.15870552, -0.15870552, -0.085161611],
+    "q99": [0.33579153, 0.0044819559, 0.42525959, 0.72795093, 0.86931777, 0.11442605, 0.77959669, 0.34829536, 0.32478839, 0.42948574, 0.19060747, 0.9860695, 0.51719558, 1.1026527, 0.74680978, 0.17438766, 1.8653436, 0.0066287201, 0.15326571, 1.1026527, 1.1026527, 1.194129, 1.8375188, 0.73050237, 2.1186435, 0.0090185478, 1.1026527, 1.1026527, 1.1026527, 1.7354861],
 }
 
 rc_aloha_pencil_case_config_train.dataset_path = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/put_pen_into_pencil_case'
@@ -78,7 +68,7 @@ rc_aloha_pencil_case_config_train.beta1 = 0.9
 rc_aloha_pencil_case_config_train.beta2 = 0.95
 rc_aloha_pencil_case_config_train.weight_decay = 1e-1
 rc_aloha_pencil_case_config_train.warmup_steps = 50
-rc_aloha_pencil_case_config_train.batch_size = 2
-rc_aloha_pencil_case_config_train.gradient_accumulation_steps = 4  # effective batch size = 4*8=32
+rc_aloha_pencil_case_config_train.batch_size = 1
+rc_aloha_pencil_case_config_train.gradient_accumulation_steps = 2  # effective batch size = 2*8=16
 rc_aloha_pencil_case_config_train.num_steps = 10000 
 rc_aloha_pencil_case_config_train.save_root = "./checkpoints/rc_aloha_pencil_case/bs32lr2.5e-5"

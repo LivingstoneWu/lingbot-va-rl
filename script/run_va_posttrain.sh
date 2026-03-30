@@ -7,7 +7,7 @@ umask 007
 cd /liujinxin/code/lhc/wy/wms/lingbot-va
 source /liujinxin/conda3/bin/activate wy-lingbotva
  
-NGPU=${NGPU:-"3"}
+NGPU=${NGPU:-"8"}
 MASTER_PORT=${MASTER_PORT:-"29502"}
 PORT=${PORT:-"1107"}
 LOG_RANK=${LOG_RANK:-"0"}
@@ -32,7 +32,7 @@ log_rank=${LOG_RANK}
 torchft_lighthouse=${TORCHFT_LIGHTHOUSE}
 config_name=${CONFIG_NAME}
 
-export CUDA_VISIBLE_DEVICES=5,6,7
+# export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 ## cmd setting
 export TOKENIZERS_PARALLELISM=false
