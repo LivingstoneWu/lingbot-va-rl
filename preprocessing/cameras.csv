@@ -1,0 +1,5 @@
+robot_type,main_camera,wrist_camera,scene_camera,wrist_camera_right
+ALOHA,cam_high_rgb,cam_wrist_left_rgb,,cam_wrist_right_rgb
+ARX5,global_realsense_rgb,arm_realsense_rgb,right_realsense_rgb,
+UR5,global_realsense_rgb,handeye_realsense_rgb,,
+Franka,main_realsense_rgb,handeye_realsense_rgb,side_realsense_rgb,
