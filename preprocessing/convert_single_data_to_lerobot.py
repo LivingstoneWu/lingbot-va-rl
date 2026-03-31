@@ -19,8 +19,10 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
 RAW_DATASET_NAMES = ["set_the_plates"]  # 请修改为实际数据集名称
 PUSH_TO_HUB = False
-PROCESS_BATCH_SIZE = 80
-NUM_WORKERS = 80
+# NOTE: keep NUM_WORKERS small (4–8). Each worker loads full video frames into
+# memory and returns large numpy arrays through the IPC pipe. 80 workers ×
+# ~300MB/episode = ~24GB peak — this causes silent OOM kills on the cluster.
+NUM_WORKERS = 4
 DATA_DIR = "/liujinxin/dataset/robochallenge/"
 
 # 摄像头CSV文件默认路径（相对于脚本所在目录）
@@ -636,6 +638,17 @@ def process_episode_batch(episodes: List[EpisodeStateFiles], include_frames: boo
     return [process_func(ep) for ep in episodes]
 
 
+# Module-level wrappers required for pool.imap (closures/lambdas can't be pickled)
+def _process_fast_wrapper(args):
+    episode, task_info, video_prompt = args
+    return process_episode_fast(episode, task_info, video_prompt)
+
+
+def _process_frames_wrapper(args):
+    episode, task_info, video_prompt = args
+    return process_episode_with_frames(episode, task_info, video_prompt)
+
+
 def main(repo_name: str,
          data_dir: str = DATA_DIR, 
          robot_type: Optional[str] = None,
@@ -819,43 +832,38 @@ def main(repo_name: str,
         metadata = main.global_metadata.get(dataset_name, {'task_info': None, 'video_prompt': None})
         process_args.append((episode, metadata['task_info'], metadata['video_prompt']))
 
+    wrapper = _process_frames_wrapper if include_frames else _process_fast_wrapper
+
+    # Use imap (chunksize=1) instead of starmap so each episode's result is
+    # consumed and freed immediately after writing, rather than accumulating
+    # all NUM_WORKERS results in memory at once.
     with Pool(processes=num_processes) as pool:
-        batch_size = PROCESS_BATCH_SIZE
-        for i in range(0, len(process_args), batch_size):
-            batch_args = process_args[i:i + batch_size]
-            batch_start_time = time.time()
+        for i, (episode_data, tasks, video_prompt) in enumerate(
+            pool.imap(wrapper, process_args, chunksize=1)
+        ):
+            episode = shuffled_episodes[i]
 
-            print(f"\n处理批次 {i//batch_size + 1}/{(len(process_args)-1)//batch_size + 1} ({len(batch_args)}个episode)")
+            if not episode_data:
+                print(f"  [{i+1}/{len(process_args)}] 跳过空的episode {episode.episode_num}")
+                continue
 
-            results = pool.starmap(process_func, batch_args)
+            print(f"  [{i+1}/{len(process_args)}] 添加episode {episode.episode_num}: {len(episode_data)}个时间步")
 
-            for episode_idx, (episode_data, tasks, video_prompt) in enumerate(results):
-                episode = shuffled_episodes[i + episode_idx]
+            for frame_data in episode_data:
+                frame_dict = {
+                    'action': frame_data['action'],
+                    'observation.state': frame_data['state'],
+                }
 
-                if not episode_data:
-                    print(f"  跳过空的episode {episode.episode_num}")
-                    continue
+                if include_frames and 'frames' in frame_data:
+                    frame_dict['observation.images.top'] = frame_data['frames'].get('top')
+                    frame_dict['observation.images.wrist'] = frame_data['frames'].get('wrist')
+                    if camera_config['scene']:
+                        frame_dict['observation.images.scene'] = frame_data['frames'].get('scene')
 
-                print(f"  添加episode {episode.episode_num}: {len(episode_data)}个时间步")
+                dataset.add_frame(frame_dict, task=tasks)
 
-                for frame_idx, frame_data in enumerate(episode_data):
-                    frame_dict = {
-                        'action': frame_data['action'],
-                        'observation.state': frame_data['state'],
-                    }
-
-                    if include_frames and 'frames' in frame_data:
-                        frame_dict['observation.images.top'] = frame_data['frames'].get('top')
-                        frame_dict['observation.images.wrist'] = frame_data['frames'].get('wrist')
-                        if camera_config['scene']:
-                            frame_dict['observation.images.scene'] = frame_data['frames'].get('scene')
-
-                    dataset.add_frame(frame_dict, task=tasks)
-
-                dataset.save_episode()
-
-            batch_time = time.time() - batch_start_time
-            print(f"  批次处理完成，耗时: {batch_time:.2f}秒")
+            dataset.save_episode()
 
     total_time = time.time() - start_time
     print(f"\n所有episode处理完成，总耗时: {total_time:.2f}秒")
