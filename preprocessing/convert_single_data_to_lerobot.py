@@ -17,10 +17,11 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # 配置常量
 HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
-RAW_DATASET_NAMES = ["example_single_arm_task"]  # 请修改为实际数据集名称
+RAW_DATASET_NAMES = ["set_the_plates"]  # 请修改为实际数据集名称
 PUSH_TO_HUB = False
 PROCESS_BATCH_SIZE = 80
 NUM_WORKERS = 80
+DATA_DIR = "/liujinxin/dataset/robochallenge/"
 
 # 摄像头CSV文件默认路径（相对于脚本所在目录）
 DEFAULT_CAMERAS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cameras.csv")
@@ -635,7 +636,8 @@ def process_episode_batch(episodes: List[EpisodeStateFiles], include_frames: boo
     return [process_func(ep) for ep in episodes]
 
 
-def main(data_dir: str, repo_name: str,
+def main(repo_name: str,
+         data_dir: str = DATA_DIR, 
          robot_type: Optional[str] = None,
          include_frames: bool = True, num_episodes: Optional[int] = None,
          cameras_csv: str = DEFAULT_CAMERAS_CSV):

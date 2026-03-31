@@ -20,6 +20,7 @@ RAW_DATASET_NAMES = ["put_pen_into_pencil_case_trim"]  # 请修改为实际数�
 PUSH_TO_HUB = False
 PROCESS_BATCH_SIZE=80
 NUM_WORKERS=80
+DATA_DIR = "/liujinxin/dataset/robochallenge/"
 
 class EpisodeStateFiles:
     """表示一个episode的左右状态文件和相关资源"""
@@ -720,7 +721,7 @@ def process_episode_batch(episodes: List[EpisodeStateFiles], include_frames: boo
     
     return results
 
-def main(data_dir: str, repo_name: str, include_frames: bool = True, num_episodes: Optional[int] = None):
+def main(repo_name: str, data_dir: str = DATA_DIR, include_frames: bool = True, num_episodes: Optional[int] = None):
     """
     主函数
     
