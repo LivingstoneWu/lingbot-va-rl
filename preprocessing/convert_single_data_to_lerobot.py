@@ -1,4 +1,7 @@
 import os
+
+os.environ['HF_LEROBOT_HOME'] = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge'
+
 import csv
 import json
 import random
@@ -8,7 +11,9 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union
 import glob
+import subprocess
 from multiprocessing import Pool, cpu_count
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import time
 import tyro
@@ -638,6 +643,81 @@ def process_episode_batch(episodes: List[EpisodeStateFiles], include_frames: boo
     return [process_func(ep) for ep in episodes]
 
 
+def reencode_video_to_h264(video_path: str) -> bool:
+    """
+    用ffmpeg将单个视频原地重编码为libx264/yuv420p格式
+
+    Args:
+        video_path: 视频文件路径
+
+    Returns:
+        成功返回True，失败返回False
+    """
+    tmp_path = video_path[:-4] + '.tmp.mp4'
+    try:
+        result = subprocess.run(
+            [
+                'ffmpeg', '-y', '-i', video_path,
+                '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+                '-pix_fmt', 'yuv420p',
+                tmp_path,
+            ],
+            capture_output=True,
+            timeout=300,
+        )
+        if result.returncode == 0:
+            os.replace(tmp_path, video_path)
+            return True
+        else:
+            print(f"  ffmpeg失败 {video_path}:\n{result.stderr.decode(errors='replace')}")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"  ffmpeg超时 {video_path}")
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        return False
+    except Exception as e:
+        print(f"  重编码出错 {video_path}: {e}")
+        return False
+
+
+def reencode_dataset_videos(dataset_path: Path, num_workers: int = 8):
+    """
+    将数据集目录下所有视频重编码为h264，替代外部av_to_h264.sh脚本
+
+    并行数量建议与NUM_WORKERS保持一致，避免CPU争抢。
+    每个ffmpeg进程本身也是多线程的，所以不需要过多并发。
+
+    Args:
+        dataset_path: LeRobot数据集根目录（HF_LEROBOT_HOME / repo_name）
+        num_workers: 并发ffmpeg进程数
+    """
+    videos_dir = dataset_path / "videos"
+    if not videos_dir.exists():
+        print(f"⚠ 视频目录不存在，跳过重编码: {videos_dir}")
+        return
+
+    video_files = sorted(videos_dir.rglob("*.mp4"))
+    if not video_files:
+        print("⚠ 未找到视频文件，跳过重编码")
+        return
+
+    print(f"\n开始重编码 {len(video_files)} 个视频文件 (并发={num_workers})...")
+    reencode_start = time.time()
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        results = list(executor.map(reencode_video_to_h264, [str(f) for f in video_files]))
+
+    success = sum(results)
+    failed = len(results) - success
+    elapsed = time.time() - reencode_start
+    print(f"重编码完成: {success}/{len(video_files)} 成功"
+          + (f", {failed} 失败" if failed else "")
+          + f", 耗时 {elapsed:.1f}秒")
+
+
 # Module-level wrappers required for pool.imap (closures/lambdas can't be pickled)
 def _process_fast_wrapper(args):
     episode, task_info, video_prompt = args
@@ -865,8 +945,14 @@ def main(repo_name: str,
 
             dataset.save_episode()
 
+    episode_time = time.time() - start_time
+    print(f"\n所有episode处理完成，耗时: {episode_time:.2f}秒")
+
+    # 重编码视频为h264（替代外部av_to_h264.sh脚本）
+    reencode_dataset_videos(output_path, num_workers=num_processes)
+
     total_time = time.time() - start_time
-    print(f"\n所有episode处理完成，总耗时: {total_time:.2f}秒")
+    print(f"总耗时（含重编码）: {total_time:.2f}秒")
 
     # dataset.consolidate(run_compute_stats=True)
     # if PUSH_TO_HUB:
