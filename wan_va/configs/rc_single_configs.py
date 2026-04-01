@@ -4,50 +4,49 @@ import os
 
 from .shared_config import va_shared_cfg
 
-rc_single_base_config = EasyDict(__name__='Config: RC Single arm base')
-rc_single_base_config.update(va_shared_cfg)
+rc_ur5_base_config = EasyDict(__name__='Config: RC UR5 arm base')
+rc_ur5_base_config.update(va_shared_cfg)
 
-rc_single_base_config.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
+rc_ur5_base_config.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
 
 # COMMENT: These are for inference
-rc_single_base_config.attn_window = 72
-rc_single_base_config.frame_chunk_size = 2
+rc_ur5_base_config.attn_window = 72
+rc_ur5_base_config.frame_chunk_size = 2
 
-rc_single_base_config.env_type = 'none'
+rc_ur5_base_config.env_type = 'none'
 
-rc_single_base_config.height = 256
-rc_single_base_config.width = 320
-rc_single_base_config.action_dim = 30
-rc_single_base_config.action_per_frame = 16
-rc_single_base_config.obs_cam_keys = [
-    'observation.images.top', 'observation.images.scene',
-    'observation.images.wrist'
+rc_ur5_base_config.height = 256
+rc_ur5_base_config.width = 320
+rc_ur5_base_config.action_dim = 30
+rc_ur5_base_config.action_per_frame = 16
+rc_ur5_base_config.obs_cam_keys = [
+    'observation.images.top', 'observation.images.wrist'
 ]
-rc_single_base_config.guidance_scale = 5
-rc_single_base_config.action_guidance_scale = 1
+rc_ur5_base_config.guidance_scale = 5
+rc_ur5_base_config.action_guidance_scale = 1
 
-rc_single_base_config.num_inference_steps = 25
-rc_single_base_config.video_exec_step = -1
-rc_single_base_config.action_num_inference_steps = 50
+rc_ur5_base_config.num_inference_steps = 25
+rc_ur5_base_config.video_exec_step = -1
+rc_ur5_base_config.action_num_inference_steps = 50
 
-rc_single_base_config.snr_shift = 5.0
-rc_single_base_config.action_snr_shift = 1.0
+rc_ur5_base_config.snr_shift = 5.0
+rc_ur5_base_config.action_snr_shift = 1.0
 
 
 # COMMENT: inverse_used_action_channel_ids maps the 30 action dimensions to the indices of the used action channels. 
 # COMMENT: not used ones are mapped to len(used_ids), or action_dim + 1, facilitating later padding.
-rc_single_base_config.used_action_channel_ids = list(range(0, 7)) + list(range(14, 20)) + [28]
+rc_ur5_base_config.used_action_channel_ids = list(range(0, 7)) + list(range(14, 20)) + [28]
 inverse_used_action_channel_ids = [
-    len(rc_single_base_config.used_action_channel_ids)
-] * rc_single_base_config.action_dim
-for i, j in enumerate(rc_single_base_config.used_action_channel_ids):
+    len(rc_ur5_base_config.used_action_channel_ids)
+] * rc_ur5_base_config.action_dim
+for i, j in enumerate(rc_ur5_base_config.used_action_channel_ids):
     inverse_used_action_channel_ids[j] = i
-rc_single_base_config.inverse_used_action_channel_ids = inverse_used_action_channel_ids
+rc_ur5_base_config.inverse_used_action_channel_ids = inverse_used_action_channel_ids
 
 
 
 rc_single_set_the_plates_config_train = EasyDict(__name__='Config: RC UR5 set the plates')
-rc_single_set_the_plates_config_train.update(rc_single_base_config)
+rc_single_set_the_plates_config_train.update(rc_ur5_base_config)
 rc_single_set_the_plates_config_train.action_norm_method = 'quantiles'
 rc_single_set_the_plates_config_train.norm_stat = {
     "q01": [-0.70612377, -0.25594482, 0.24335368, -0.65606493, -0.83061516, -0.67004627, -0.47191674, 0, 0, 0, 0, 0, 0, 0, -0.56730443, -2.1418378, -2.0096891, -1.571, 0.62312514, -1.7936109, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0],

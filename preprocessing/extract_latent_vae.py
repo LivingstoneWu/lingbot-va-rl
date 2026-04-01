@@ -351,6 +351,86 @@ def extract_text_embeddings(text, tokenizer, text_encoder, device, num_videos_pe
     return prompt_embeds.cpu()
 
 
+def detect_camera_key(latents_dir: Path):
+    """从latents目录结构中自动检测第一个可用的摄像头键名。"""
+    for chunk_dir in sorted(latents_dir.glob('chunk-*')):
+        if not chunk_dir.is_dir():
+            continue
+        for cam_dir in sorted(chunk_dir.iterdir()):
+            if cam_dir.is_dir():
+                return cam_dir.name
+    return None
+
+
+def get_episode_windows(latents_dir: Path, episode_id: int, camera_key: str):
+    """
+    扫描latent文件名获取指定episode的所有时间窗口。
+    文件名格式: episode_{id:06d}_{start_frame}_{end_frame}.pth
+    返回按start_frame排序的 (start, end) 列表。
+    """
+    windows = []
+    for pth_file in latents_dir.glob(f'chunk-*/{camera_key}/episode_{episode_id:06d}_*.pth'):
+        parts = pth_file.stem.split('_')
+        try:
+            windows.append((int(parts[-2]), int(parts[-1])))
+        except (ValueError, IndexError):
+            logger.warning(f"无法解析latent文件名: {pth_file.name}")
+    return sorted(windows)
+
+
+def update_episodes_jsonl(dataset_root: Path, meta_dir: Path, latents_dir: Path):
+    """
+    latent提取完成后，由rank 0调用。
+    扫描latent目录，将每个episode的实际时间窗口写入episodes.jsonl的action_config字段。
+    原始文件备份为episodes_original.jsonl（仅在首次调用时备份）。
+    """
+    import shutil
+
+    episodes_file = meta_dir / 'episodes.jsonl'
+    backup_file = meta_dir / 'episodes_original.jsonl'
+
+    if not episodes_file.exists():
+        logger.error(f"episodes.jsonl不存在: {episodes_file}")
+        return
+
+    camera_key = detect_camera_key(latents_dir)
+    if camera_key is None:
+        logger.error(f"在 {latents_dir} 下未找到任何latent文件，跳过episodes.jsonl更新")
+        return
+    logger.info(f"更新episodes.jsonl，使用摄像头键名: {camera_key}")
+
+    if not backup_file.exists():
+        shutil.copy2(episodes_file, backup_file)
+        logger.info(f"原始文件已备份到: {backup_file}")
+
+    episodes = []
+    with open(episodes_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            ep = json.loads(line)
+            episode_id = ep['episode_index']
+            windows = get_episode_windows(latents_dir, episode_id, camera_key)
+
+            tasks = ep.get('tasks', [])
+            action_text = (tasks[0] if isinstance(tasks, list) else tasks) if tasks else ''
+
+            ep['action_config'] = [
+                {'start_frame': s, 'end_frame': e, 'action_text': action_text, 'skill': ''}
+                for s, e in windows
+            ]
+            if not windows:
+                logger.warning(f"Episode {episode_id}: 未找到latent文件，action_config为空")
+            episodes.append(ep)
+
+    with open(episodes_file, 'w', encoding='utf-8') as f:
+        for ep in episodes:
+            f.write(json.dumps(ep, ensure_ascii=False) + '\n')
+
+    total_windows = sum(len(ep['action_config']) for ep in episodes)
+    logger.info(f"episodes.jsonl更新完成: {len(episodes)} 个episode，{total_windows} 个action_config窗口")
+
+
 def load_metadata(meta_path):
     """
     加载episodes.jsonl文件
@@ -669,6 +749,14 @@ def main():
         torch.cuda.empty_cache()
     
     logger.info(f"Latent extraction completed! Processed {total_episodes} episodes, {total_chunks} chunks")
+
+    # 所有rank完成后，由rank 0更新episodes.jsonl中的action_config
+    if world_size > 1:
+        import torch.distributed as dist
+        dist.barrier()
+
+    if rank == 0:
+        update_episodes_jsonl(dataset_root, meta_dir, latents_dir)
 
 
 if __name__ == "__main__":
