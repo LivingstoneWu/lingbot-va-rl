@@ -74,17 +74,25 @@ def patch_parquet(
     Patches observation.state[:, 0:EEF_DIM] and action[:, 0:EEF_DIM] in one
     parquet file for the given episodes.
 
+    Operates on the full columns as 2D numpy arrays to avoid pandas' problematic
+    behaviour when assigning arrays into object-dtype columns with .loc.
+
     Returns:
         (rows_patched, skipped_episode_indices)
     """
     table = pq.read_table(parquet_path)
     df = table.to_pandas()
 
+    # Stack full columns once — shape (total_rows, 14)
+    obs_full = np.stack(df['observation.state'].values)
+    act_full = np.stack(df['action'].values)
+    ep_indices = df['episode_index'].values  # numpy array for fast boolean indexing
+
     rows_patched = 0
     skipped = []
 
     for ep_idx, (eef_states, eef_actions) in episode_eef_map.items():
-        mask = df['episode_index'] == ep_idx
+        mask = ep_indices == ep_idx
         n_rows = mask.sum()
 
         if n_rows == 0:
@@ -96,17 +104,13 @@ def patch_parquet(
             skipped.append(ep_idx)
             continue
 
-        # Stack the full (N, 14) arrays, patch dims 0:EEF_DIM, write back as rows of lists
-        obs = np.stack(df.loc[mask, 'observation.state'].values)   # (N, 14)
-        act = np.stack(df.loc[mask, 'action'].values)              # (N, 14)
-
-        obs[:, :EEF_DIM] = eef_states
-        act[:, :EEF_DIM] = eef_actions
-
-        df.loc[mask, 'observation.state'] = [row for row in obs]
-        df.loc[mask, 'action'] = [row for row in act]
-
+        obs_full[mask, :EEF_DIM] = eef_states
+        act_full[mask, :EEF_DIM] = eef_actions
         rows_patched += n_rows
+
+    # Assign full columns back — list of 1-D arrays avoids pandas 2D broadcast issue
+    df['observation.state'] = list(obs_full)
+    df['action'] = list(act_full)
 
     # Write back preserving the original pyarrow schema
     patched_table = pa.Table.from_pandas(df, schema=table.schema, preserve_index=False)
@@ -151,7 +155,7 @@ def main(
     print(f"Valid source episodes : {len(source_episodes)}")
 
     # ── 2. Converted dataset parquet files ────────────────────────────────────
-    data_dir_path = dataset_path / 'data'
+    data_dir_path = dataset_path / 'data/chunk-000'
     parquet_files = sorted(data_dir_path.glob('train-*.parquet'))
     if not parquet_files:
         parquet_files = sorted(data_dir_path.glob('*.parquet'))

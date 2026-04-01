@@ -1,5 +1,5 @@
 import torch, glob, os
-dataset_root = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/put_pen_into_pencil_case"
+dataset_root = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/set_the_plates"
 pths = glob.glob(os.path.join(dataset_root, "latents", "chunk-*", "observation.images.*", "episode_*.pth"))
 assert pths, "No latent pth found"
 sample = torch.load(pths[0], weights_only=False)

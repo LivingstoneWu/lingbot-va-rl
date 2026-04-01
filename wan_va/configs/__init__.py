@@ -20,5 +20,5 @@ VA_CONFIGS = {
     'demo_train': va_demo_train_cfg,
     'demo_i2av': va_demo_i2va_cfg,
     'rc_aloha_pencil_case_train': rc_aloha_pencil_case_config_train,
-    'rc_single_base': rc_single_base_config
+    'rc_ur5_set_the_plates': rc_single_set_the_plates_config_train,
 }

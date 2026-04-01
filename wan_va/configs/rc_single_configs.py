@@ -46,29 +46,29 @@ rc_single_base_config.inverse_used_action_channel_ids = inverse_used_action_chan
 
 
 
-rc_aloha_pencil_case_config_train = EasyDict(__name__='Config: RC ALOHA pencil case')
-rc_aloha_pencil_case_config_train.update(rc_single_base_config)
-rc_aloha_pencil_case_config_train.action_norm_method = 'quantiles'
-rc_aloha_pencil_case_config_train.norm_stat = {
-    "q01": [0.031551607, -0.14152533, 0.15114924, -0.083684184, 0.6086638, -0.23346399, 0.0018790263, 0.022730829, -0.0038374024, 0.1484917, -0.54672539, 0.60530323, -0.030355122, -0.15870552, 0.018053232, -0.43822816, -0.000627984, -1.3246624, -0.90175295, -0.15870552, -0.15870552, -0.1313882, -0.19809407, -0.072915919, -0.00045354399, -1.5296671, -0.15870552, -0.15870552, -0.15870552, -0.085161611],
-    "q99": [0.33579153, 0.0044819559, 0.42525959, 0.72795093, 0.86931777, 0.11442605, 0.77959669, 0.34829536, 0.32478839, 0.42948574, 0.19060747, 0.9860695, 0.51719558, 1.1026527, 0.74680978, 0.17438766, 1.8653436, 0.0066287201, 0.15326571, 1.1026527, 1.1026527, 1.194129, 1.8375188, 0.73050237, 2.1186435, 0.0090185478, 1.1026527, 1.1026527, 1.1026527, 1.7354861],
+rc_single_set_the_plates_config_train = EasyDict(__name__='Config: RC UR5 set the plates')
+rc_single_set_the_plates_config_train.update(rc_single_base_config)
+rc_single_set_the_plates_config_train.action_norm_method = 'quantiles'
+rc_single_set_the_plates_config_train.norm_stat = {
+    "q01": [-0.70612377, -0.25594482, 0.24335368, -0.65606493, -0.83061516, -0.67004627, -0.47191674, 0, 0, 0, 0, 0, 0, 0, -0.56730443, -2.1418378, -2.0096891, -1.571, 0.62312514, -1.7936109, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0],
+    "q99": [-0.41302848, 0.36700642, 0.59971273, 0.98459029, 0.98832572, 0.69834197, 0.69406056, 0, 0, 0, 0, 0, 0, 0, 0.77211893, -1.4448384, -1.12301, 0.41157055, 2.0893166, 1.8927952, 0, 0, 0, 0, 0, 0, 0, 0, 226, 0],
 }
 
-rc_aloha_pencil_case_config_train.dataset_path = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/put_pen_into_pencil_case'
-rc_aloha_pencil_case_config_train.empty_emb_path = os.path.join(rc_aloha_pencil_case_config_train.dataset_path, 'empty_emb.pt')
-rc_aloha_pencil_case_config_train.enable_wandb = False 
-rc_aloha_pencil_case_config_train.load_worker = 2
-rc_aloha_pencil_case_config_train.save_interval = 2000
-rc_aloha_pencil_case_config_train.gc_interval = 50
-rc_aloha_pencil_case_config_train.cfg_prob = 0.1
+rc_single_set_the_plates_config_train.dataset_path = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/set_the_plates'
+rc_single_set_the_plates_config_train.empty_emb_path = os.path.join(rc_single_set_the_plates_config_train.dataset_path, 'empty_emb.pt')
+rc_single_set_the_plates_config_train.enable_wandb = False 
+rc_single_set_the_plates_config_train.load_worker = 2
+rc_single_set_the_plates_config_train.save_interval = 2000
+rc_single_set_the_plates_config_train.gc_interval = 50
+rc_single_set_the_plates_config_train.cfg_prob = 0.1
 
 # Training parameters
-rc_aloha_pencil_case_config_train.learning_rate = 2.5e-5
-rc_aloha_pencil_case_config_train.beta1 = 0.9
-rc_aloha_pencil_case_config_train.beta2 = 0.95
-rc_aloha_pencil_case_config_train.weight_decay = 1e-1
-rc_aloha_pencil_case_config_train.warmup_steps = 50
-rc_aloha_pencil_case_config_train.batch_size = 1
-rc_aloha_pencil_case_config_train.gradient_accumulation_steps = 2  # effective batch size = 2*8=16
-rc_aloha_pencil_case_config_train.num_steps = 10000 
-rc_aloha_pencil_case_config_train.save_root = "./checkpoints/rc_aloha_pencil_case/bs32lr2.5e-5"
+rc_single_set_the_plates_config_train.learning_rate = 2.5e-5
+rc_single_set_the_plates_config_train.beta1 = 0.9
+rc_single_set_the_plates_config_train.beta2 = 0.95
+rc_single_set_the_plates_config_train.weight_decay = 1e-1
+rc_single_set_the_plates_config_train.warmup_steps = 50
+rc_single_set_the_plates_config_train.batch_size = 1
+rc_single_set_the_plates_config_train.gradient_accumulation_steps = 2  # effective batch size = 2*8=16
+rc_single_set_the_plates_config_train.num_steps = 10000 
+rc_single_set_the_plates_config_train.save_root = "./checkpoints/rc_set_the_plates/bs16lr2.5e-5"

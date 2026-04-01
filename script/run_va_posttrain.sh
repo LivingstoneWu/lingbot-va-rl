@@ -13,7 +13,7 @@ PORT=${PORT:-"1107"}
 LOG_RANK=${LOG_RANK:-"0"}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 # CONFIG_NAME=${CONFIG_NAME:-"robotwin_train"}
-CONFIG_NAME=${CONFIG_NAME:-"rc_aloha_pencil_case_train"}
+CONFIG_NAME=${CONFIG_NAME:-"rc_ur5_set_the_plates"}
 
 overrides=""
 if [ $# -ne 0 ]; then
