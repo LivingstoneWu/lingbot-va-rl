@@ -68,6 +68,7 @@ rc_single_set_the_plates_config_train.beta1 = 0.9
 rc_single_set_the_plates_config_train.beta2 = 0.95
 rc_single_set_the_plates_config_train.weight_decay = 1e-1
 rc_single_set_the_plates_config_train.warmup_steps = 50
+rc_single_set_the_plates_config_train.min_lr = 1e-6
 rc_single_set_the_plates_config_train.batch_size = 1
 rc_single_set_the_plates_config_train.gradient_accumulation_steps = 2  # effective batch size = 2*8=16
 rc_single_set_the_plates_config_train.num_steps = 10000 

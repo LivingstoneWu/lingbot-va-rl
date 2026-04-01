@@ -117,8 +117,23 @@ class Trainer:
             foreach=False,
         )
 
-        self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, 
-            lr_lambda=lambda step: warmup_constant_lambda(step, warmup_steps=config.warmup_steps))
+        warmup_lr_scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer,
+            start_factor=1e-8,   # avoid exactly 0
+            end_factor=1.0,
+            total_iters=config.warmup_steps,
+        )
+        cosine_annealing_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=config.num_steps - config.warmup_steps,
+            eta_min=config.min_lr,
+        )
+        self.lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer,
+            schedulers=[warmup_lr_scheduler, cosine_annealing_lr_scheduler],    
+            milestones=[config.warmup_steps]
+        )
+
 
         # Setup dataloaders
         logger.info("Setting up datasets...")
