@@ -8,6 +8,7 @@ from .va_demo_train_cfg import va_demo_train_cfg
 from .va_demo_cfg import va_demo_cfg
 from .va_demo_i2va import va_demo_i2va_cfg
 from .rc_aloha_configs import *
+from .rc_single_configs import *
 
 VA_CONFIGS = {
     'robotwin': va_robotwin_cfg,
@@ -19,4 +20,5 @@ VA_CONFIGS = {
     'demo_train': va_demo_train_cfg,
     'demo_i2av': va_demo_i2va_cfg,
     'rc_aloha_pencil_case_train': rc_aloha_pencil_case_config_train,
+    'rc_single_base': rc_single_base_config
 }

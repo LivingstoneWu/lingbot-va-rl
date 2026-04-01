@@ -11,7 +11,7 @@ if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
   torchrun --nproc_per_node "${NPROC_PER_NODE}" "${SCRIPT_DIR}/extract_latent_vae.py" \
     --config-name "demo" \
     --dataset-root "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/set_the_plates" \
-    --camera-keys "top" "left_wrist" "right_wrist" \
+    --camera-keys "top" "scene" "wrist" \
     --target-fps "15" \
     --height "256" \
     --width "256" \
@@ -21,7 +21,7 @@ else
   python "${SCRIPT_DIR}/extract_latent_vae.py" \
     --config-name "demo" \
     --dataset-root "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/set_the_plates" \
-    --camera-keys "top" "left_wrist" "right_wrist" \
+    --camera-keys "top" "scene" "wrist" \
     --target-fps "15" \
     --height "256" \
     --width "256" \

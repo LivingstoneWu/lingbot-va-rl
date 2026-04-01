@@ -22,7 +22,7 @@ PUSH_TO_HUB = False
 # NOTE: keep NUM_WORKERS small (4–8). Each worker loads full video frames into
 # memory and returns large numpy arrays through the IPC pipe. 80 workers ×
 # ~300MB/episode = ~24GB peak — this causes silent OOM kills on the cluster.
-NUM_WORKERS = 4
+NUM_WORKERS = 8
 DATA_DIR = "/liujinxin/dataset/robochallenge/"
 
 # 摄像头CSV文件默认路径（相对于脚本所在目录）
@@ -470,8 +470,8 @@ def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[
         episode_data = []
 
         for index in range(valid_len):
-            eef_state = np.array(states_data[index].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
-            eef_action = np.array(states_data[index + 1].get('ee_pose_quaternion', np.zeros(7)), dtype=np.float32)
+            eef_state = np.array(states_data[index].get('ee_positions', np.zeros(7)), dtype=np.float32)
+            eef_action = np.array(states_data[index + 1].get('ee_positions', np.zeros(7)), dtype=np.float32)
             joints_state = np.array(states_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
             joints_action = np.array(states_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
             gripper_state = float(states_data[index].get('gripper', 0.0))
