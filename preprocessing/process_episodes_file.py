@@ -28,8 +28,12 @@ def get_episode_windows(latents_dir: Path, episode_id: int, camera_key: str) -> 
 
     文件名格式: episode_{id:06d}_{start_frame}_{end_frame}.pth
 
+    过滤掉 end_frame - start_frame <= 1 的条目：这些对应仅有1帧的chunk，
+    是 split_into_chunks 将2-4帧的末尾chunk压缩至1帧的产物。
+    这类chunk的 frame_ids 只有1个元素，训练时 latent_frame_ids[1] 会报 IndexError。
+
     Returns:
-        按start_frame排序的 (start_frame, end_frame) 列表
+        按start_frame排序的 (start_frame, end_frame) 列表（已过滤无效条目）
     """
     windows = []
     pattern = f'chunk-*/{camera_key}/episode_{episode_id:06d}_*.pth'
@@ -39,9 +43,13 @@ def get_episode_windows(latents_dir: Path, episode_id: int, camera_key: str) -> 
         try:
             start = int(parts[-2])
             end = int(parts[-1])
-            windows.append((start, end))
         except (ValueError, IndexError):
             print(f"  警告: 无法解析文件名 {pth_file.name}，跳过")
+            continue
+        if end - start <= 1:
+            print(f"  跳过单帧chunk: {pth_file.name} (end - start = {end - start})")
+            continue
+        windows.append((start, end))
     return sorted(windows)
 
 

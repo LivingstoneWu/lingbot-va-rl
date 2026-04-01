@@ -271,15 +271,22 @@ class VideoProcessor:
             chunk_frames = frames[start_idx:end_idx]
             chunk_frame_ids = frame_ids[start_idx:end_idx]
             
-            # 检查每个chunk的帧数是否满足约束
+            # 检查每个chunk的帧数是否满足约束 (n-1) % 4 == 0
             chunk_len = len(chunk_frames)
             if (chunk_len - 1) % 4 != 0:
-                # 如果不满足，调整到满足条件的帧数
                 adjusted_len = ((chunk_len - 1) // 4) * 4 + 1
                 chunk_frames = chunk_frames[:adjusted_len]
                 chunk_frame_ids = chunk_frame_ids[:adjusted_len]
                 logger.info(f"  Adjusted chunk from {chunk_len} to {adjusted_len} frames to satisfy (n-1)%4==0")
-            
+
+            # 丢弃过小的chunk（调整后小于5帧）：
+            # chunk_len=2,3,4 均被调整为1帧，导致frame_ids只有1个元素，
+            # 训练时 latent_frame_ids[1] 会报 IndexError。
+            # 最小有效大小为5帧（时序stride=4下可产生2个latent帧）。
+            if len(chunk_frames) < 5:
+                logger.info(f"  Skipping chunk at start_idx={start_idx}: only {len(chunk_frames)} frame(s) after adjustment (minimum is 5)")
+                continue
+
             chunks.append((chunk_frames, chunk_frame_ids, start_idx, end_idx))
         
         return chunks
@@ -366,15 +373,21 @@ def get_episode_windows(latents_dir: Path, episode_id: int, camera_key: str):
     """
     扫描latent文件名获取指定episode的所有时间窗口。
     文件名格式: episode_{id:06d}_{start_frame}_{end_frame}.pth
+    过滤掉 end - start <= 1 的单帧chunk（训练时会导致 IndexError）。
     返回按start_frame排序的 (start, end) 列表。
     """
     windows = []
     for pth_file in latents_dir.glob(f'chunk-*/{camera_key}/episode_{episode_id:06d}_*.pth'):
         parts = pth_file.stem.split('_')
         try:
-            windows.append((int(parts[-2]), int(parts[-1])))
+            start, end = int(parts[-2]), int(parts[-1])
         except (ValueError, IndexError):
             logger.warning(f"无法解析latent文件名: {pth_file.name}")
+            continue
+        if end - start <= 1:
+            logger.info(f"跳过单帧chunk: {pth_file.name}")
+            continue
+        windows.append((start, end))
     return sorted(windows)
 
 
