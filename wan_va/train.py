@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 import wandb
 
@@ -160,6 +161,7 @@ class Trainer:
 
         self.save_dir = Path(config.save_root) / "checkpoints"
         self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file = self.save_dir / 'log.jsonl'
 
         self.gradient_accumulation_steps = getattr(config, 'gradient_accumulation_steps', 1)
         self.train_loader_iter = None
@@ -497,6 +499,28 @@ class Trainer:
                         'grad_norm': f'{total_norm.item():.2f}',
                         'lr': f'{lr:.2e}'
                     })
+                    logger.info(
+                        f"step={self.step} "
+                        f"latent_loss={latent_loss_show:.4f} "
+                        f"action_loss={action_loss_show:.4f} "
+                        f"total_loss={latent_loss_show + action_loss_show:.4f} "
+                        f"grad_norm={total_norm.item():.4f} "
+                        f"lr={lr:.2e}"
+                    )
+                    if self.step % self.config.log_freq == 0:
+                        log_entry = {
+                            'step': self.step,
+                            'time': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                            'latent_loss': round(latent_loss_show, 6),
+                            'max_latent_loss': round(max_latent_loss_show, 6),
+                            'action_loss': round(action_loss_show, 6),
+                            'max_action_loss': round(max_action_loss_show, 6),
+                            'total_loss': round(latent_loss_show + action_loss_show, 6),
+                            'grad_norm': round(total_norm.item(), 6),
+                            'lr': lr,
+                        }
+                        with open(self.log_file, 'a') as f:
+                            f.write(json.dumps(log_entry) + '\n')
                     if self.config.enable_wandb:
                         self.wandb.log({
                             'loss_metrics/global_avg_video_loss': latent_loss_show,
