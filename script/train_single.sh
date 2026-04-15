@@ -7,13 +7,12 @@ umask 007
 cd /liujinxin/code/lhc/wy/wms/lingbot-va
 source /liujinxin/conda3/bin/activate wy-lingbotva
  
-NGPU=${NGPU:-"8"}
+NGPU=${NGPU:-"2"}
 MASTER_PORT=${MASTER_PORT:-"29502"}
 PORT=${PORT:-"1107"}
 LOG_RANK=${LOG_RANK:-"0"}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
-# CONFIG_NAME=${CONFIG_NAME:-"robotwin_train"}
-CONFIG_NAME=${CONFIG_NAME:-"rc_aloha_pencil_case_train"}
+CONFIG_NAME=${CONFIG_NAME:-"local_ur5_stack_color_blocks"}
 
 overrides=""
 if [ $# -ne 0 ]; then

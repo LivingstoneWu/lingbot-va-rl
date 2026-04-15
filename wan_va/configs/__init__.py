@@ -21,4 +21,10 @@ VA_CONFIGS = {
     'demo_i2av': va_demo_i2va_cfg,
     'rc_aloha_pencil_case_train': rc_aloha_pencil_case_config_train,
     'rc_ur5_set_the_plates': rc_single_set_the_plates_config_train,
+    'rc_ur5_base_config': rc_ur5_base_config,
+    'rc_aloha_pencil_case_inf': rc_aloha_pencil_case_config_inf,
+    'rc_aloha_qr_inf': rc_aloha_qr_code_config_inf,
+    'rc_ur5_stack_blocks_train': rc_single_stack_color_blocks_config_train,
+    'rc_ur5_arrange_fruits_train': rc_single_arrange_fruits_config_train,
+    'local_ur5_stack_color_blocks': local_ur5_stack_color_blocks_config, 
 }

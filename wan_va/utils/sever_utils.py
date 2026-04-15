@@ -23,6 +23,10 @@ def distributed_infer(model, obs, local_rank):
     """
     TODO
     """
+    # Single-rank or non-distributed fallback.
+    if (not dist.is_available()) or (not dist.is_initialized()) or dist.get_world_size() <= 1:
+        return model.infer(obs)
+
     rank = dist.get_rank()
     assert rank == local_rank, "distributed_infer can only run at（rank 0)"
 
@@ -43,6 +47,10 @@ def worker_loop(model, local_rank):
     """
     TODO
     """
+    if (not dist.is_available()) or (not dist.is_initialized()) or dist.get_world_size() <= 1:
+        logger.info("[worker_loop] Distributed not initialized or world_size<=1; skip worker loop.")
+        return
+
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     rank = dist.get_rank()
 
@@ -64,11 +72,11 @@ def worker_loop(model, local_rank):
     logger.info(f"[worker_loop] Rank {rank} exiting.")
 
 
-def run_async_server_mode(model, local_rank, host, port):
+def run_async_server_mode(model, local_rank, host, port, metadata=None):
     logger.info("Running in ASYNC SERVER mode")
     if local_rank == 0:
         dist_model = DistributedModelWrapper(model, local_rank=local_rank)
-        model_server = WebsocketPolicyServer(dist_model, host=host, port=port)
+        model_server = WebsocketPolicyServer(dist_model, host=host, port=port, metadata=metadata)
         model_server.serve_forever()
 
         cmd = torch.tensor(

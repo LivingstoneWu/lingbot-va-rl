@@ -15,7 +15,6 @@ from diffusers.pipelines.wan.pipeline_wan import prompt_clean
 from einops import rearrange
 from tqdm import tqdm
 
-
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from configs import VA_CONFIGS
@@ -79,8 +78,7 @@ class VA_Server:
         )
 
         self.transformer = load_transformer(
-            #os.path.join(job_config.wan22_pretrained_model_name_or_path,
-            os.path.join(job_config.wan22_finetuned_model_name_or_path,
+            os.path.join(job_config.wan22_pretrained_model_name_or_path,
                          'transformer'),
             torch_dtype=self.dtype,
             torch_device=self.device,
@@ -222,238 +220,35 @@ class VA_Server:
         latents = ((latents.float() - latents_mean) * latents_std).to(latents)
         return latents
 
-    # def preprocess_action(self, action):
-    #     action_model_input = torch.from_numpy(action)
-    #     CA, FA, HA = action_model_input.shape  # C, F, H
-    #     action_model_input_paded = F.pad(action_model_input,
-    #                                      [0, 0, 0, 0, 0, 1],
-    #                                      mode='constant',
-    #                                      value=0)
-
-    #     action_model_input = action_model_input_paded[
-    #         self.job_config.inverse_used_action_channel_ids]
-
-    #     if self.action_norm_method == 'quantiles':
-    #         action_model_input = (action_model_input - self.actions_q01) / (
-    #             self.actions_q99 - self.actions_q01 + 1e-6) * 2. - 1.
-    #     else:
-    #         raise NotImplementedError
-    #     return action_model_input.unsqueeze(0).unsqueeze(-1)  # B, C, F, H, W
-    
-    
     def preprocess_action(self, action):
-        """
-        输入:
-            action:
-                1) 原始时序动作/状态: (T, D)，例如 (1, 7), (4, 7), (8, 7)
-                2) 也兼容单帧: (D,) -> 自动转成 (1, D)
+        action_model_input = torch.from_numpy(action)
+        CA, FA, HA = action_model_input.shape  # C, F, H
+        action_model_input_paded = F.pad(action_model_input,
+                                         [0, 0, 0, 0, 0, 1],
+                                         mode='constant',
+                                         value=0)
 
-        输出:
-            action_model_input: (B, C, F, H, W)
-                其中:
-                - B = 1
-                - C = len(inverse_used_action_channel_ids)
-                - F = latent_frame_num
-                - H = 4
-                - W = 1
-        """
-
-        if isinstance(action, torch.Tensor):
-            action = action.detach().cpu().numpy()
-        else:
-            action = np.asarray(action)
-
-        # 支持 (D,) -> (1, D)
-        if action.ndim == 1:
-            action = action[None, :]
-        elif action.ndim != 2:
-            raise ValueError(f"preprocess_action expects action shape (T, D) or (D,), got {action.shape}")
-
-        # action: (T, D)
-        T, D = action.shape
-
-        # ===== 1) 构造 mask =====
-        action_mask = np.ones_like(action, dtype=bool)
-
-        # ===== 2) 前面 pad 4 帧 =====
-        # 对齐训练里的:
-        # pad_len = frame_stride * 4
-        # 在 debug / inference 里先按 frame_stride = 1 处理
-        # MYEDIT: need to match the pattern in training
-        pad_len = self.job_config.action_per_frame
-
-
-        action = np.pad(
-            action,
-            pad_width=((pad_len, 0), (0, 0)),
-            mode='constant',
-            constant_values=0
-        )
-        action_mask = np.pad(
-            action_mask,
-            pad_width=((pad_len, 0), (0, 0)),
-            mode='constant',
-            constant_values=False
-        )
-
-        # ===== 3) 截断到能被 4 整除 =====
-        total_len = action.shape[0]
-        required_action_num = ((total_len + 3) // 4) * 4  # 向上补齐到 4 的倍数
-
-        if total_len < required_action_num:
-            extra = required_action_num - total_len
-            action = np.pad(
-                action,
-                pad_width=((0, extra), (0, 0)),
-                mode='constant',
-                constant_values=0
-            )
-            action_mask = np.pad(
-                action_mask,
-                pad_width=((0, extra), (0, 0)),
-                mode='constant',
-                constant_values=False
-            )
-        else:
-            action = action[:required_action_num]
-            action_mask = action_mask[:required_action_num]
-
-        latent_frame_num = required_action_num // 4
-
-        # ===== 4) 通道补 1 维，和训练保持一致 =====
-        print("action dim before padding: ", action.shape)
-        print("inverse_ids max: ", max(self.job_config.inverse_used_action_channel_ids))
-        action_paded = np.pad(
-            action,
-            ((0, 0), (0, 1)),
-            mode='constant',
-            constant_values=0
-        )
-        action_mask_padded = np.pad(
-            action_mask,
-            ((0, 0), (0, 1)),
-            mode='constant',
-            constant_values=False
-        )
-
-        # ===== 6) 通道对齐 =====
-        inverse_ids = np.array(self.job_config.inverse_used_action_channel_ids)
-        action_aligned      = action_paded[:,       inverse_ids]
-        action_mask_aligned = action_mask_padded[:, inverse_ids]
+        action_model_input = action_model_input_paded[
+            self.job_config.inverse_used_action_channel_ids]
 
         if self.action_norm_method == 'quantiles':
-            action_aligned[:, self.action_valid] = np.where(
-                action_mask_aligned[:, self.action_valid],
-                (action_aligned[:, self.action_valid] - self.q01[self.action_valid]) /
-                (self.q99[self.action_valid] - self.q01[self.action_valid] + 1e-6) * 2.0 - 1.0,
-                0.0
-            )
-            action_aligned[:, ~self.action_valid] = 0.0
+            action_model_input = (action_model_input - self.actions_q01) / (
+                self.actions_q99 - self.actions_q01 + 1e-6) * 2. - 1.
         else:
             raise NotImplementedError
+        return action_model_input.unsqueeze(0).unsqueeze(-1)  # B, C, F, H, W
 
-        # ===== 7) reshape 成训练时同款格式: (C, F, 4, 1) =====
-        action_aligned = rearrange(
-            action_aligned,
-            "(f n) c -> c f n 1",
-            f=latent_frame_num
-        )
-        action_mask_aligned = rearrange(
-            action_mask_aligned,
-            "(f n) c -> c f n 1",
-            f=latent_frame_num
-        )
-
-        action_aligned = action_aligned * action_mask_aligned
-
-        # ===== 8) 加 batch 维 -> (1, C, F, 4, 1) =====
-        action_model_input = torch.from_numpy(action_aligned).float().unsqueeze(0)
-
-        return action_model_input
-
-    # def postprocess_action(self, action):
-    #     action = action.cpu()  # B, C, F, H, W
-
-    #     action = action[0, ..., 0]  #C, F, H
-    #     if self.action_norm_method == 'quantiles':
-    #         action = (action + 1) / 2 * (self.actions_q99 - self.actions_q01 +
-    #                                      1e-6) + self.actions_q01
-    #     else:
-    #         raise NotImplementedError
-    #     action = action.squeeze(0).detach().cpu().numpy()
-    #     return action[self.job_config.used_action_channel_ids]
-        
-    
-    # def postprocess_action(self, action):
-
-    #     action = action.detach().cpu()   # (B, C, F, H, W)
-    #     action = action[0, ..., 0]       # (C, F, H)
-
-    #     if self.action_norm_method != 'quantiles':
-    #         raise NotImplementedError
-
-    #     # self.actions_q01 / self.actions_q99: (7, 1, 1)
-    #     q01 = self.actions_q01.detach().cpu().numpy().reshape(self.actions_q01.shape[0], -1)[:, 0][None, :]
-    #     q99 = self.actions_q99.detach().cpu().numpy().reshape(self.actions_q99.shape[0], -1)[:, 0][None, :]
-
-    #     # pad 到 (1, 8)
-    #     q01_paded = np.pad(q01, ((0, 0), (0, 1)), mode='constant', constant_values=0)
-    #     q99_paded = np.pad(q99, ((0, 0), (0, 1)), mode='constant', constant_values=0)
-
-    #     inverse_ids = np.array(self.job_config.inverse_used_action_channel_ids)
-
-    #     # 对齐到模型通道空间
-    #     q01_aligned = q01_paded[:, inverse_ids]   # (1, C_model)
-    #     q99_aligned = q99_paded[:, inverse_ids]   # (1, C_model)
-
-    #     valid = inverse_ids < q01.shape[1]        # 只有真实原始通道有效
-
-    #     q01_aligned = torch.from_numpy(q01_aligned[0]).float().unsqueeze(-1).unsqueeze(-1)  # (C_model,1,1)
-    #     q99_aligned = torch.from_numpy(q99_aligned[0]).float().unsqueeze(-1).unsqueeze(-1)  # (C_model,1,1)
-    #     valid_t = torch.from_numpy(valid).bool().unsqueeze(-1).unsqueeze(-1)                 # (C_model,1,1)
-
-    #     action = torch.where(
-    #         valid_t,
-    #         (action + 1.0) / 2.0 * (q99_aligned - q01_aligned + 1e-6) + q01_aligned,
-    #         torch.zeros_like(action)
-    #     )
-
-    #     action = action.numpy()   # (C_model, F, H)
-        
-    #     action = action[self.job_config.used_action_channel_ids]
-
-    #     return action
-    
     def postprocess_action(self, action):
-        action = action.detach().cpu()   # (B, C, F, H, W)
-        action = action[0, ..., 0]       # (C, F, H)
+        action = action.cpu()  # B, C, F, H, W
 
-        if self.action_norm_method != 'quantiles':
+        action = action[0, ..., 0]  #C, F, H
+        if self.action_norm_method == 'quantiles':
+            action = (action + 1) / 2 * (self.actions_q99 - self.actions_q01 +
+                                         1e-6) + self.actions_q01
+        else:
             raise NotImplementedError
-
-        # Reshape to (C_model, 1, 1) for broadcasting against (C_model, F, H)
-        q01 = torch.from_numpy(self.q01).float().view(-1, 1, 1)
-        q99 = torch.from_numpy(self.q99).float().view(-1, 1, 1)
-        valid = torch.from_numpy(self.action_valid).bool().view(-1, 1, 1)
-
-        # 反归一化
-        action = torch.where(
-            valid,
-            (action + 1.0) / 2.0 * (torch.maximum(q99 - q01, torch.tensor(1e-2)) + 1e-6) + q01,
-            torch.zeros_like(action)
-        )
-
-        action = action.numpy()   # (C_model, F, H)
-
-        # 取出真实用到的原始动作通道
-        action = action[self.job_config.used_action_channel_ids]   # (C_used, F, H)
-        # 通常这里是 (7, F, H)
-
-        # 变成时间序列格式: (C, F, H) -> (F, H, C) -> (F*H, C)
-        action = np.transpose(action, (1, 2, 0))   # (F, H, C_used)
-        action = action.reshape(-1, action.shape[-1])   # (N, C_used)
-
-        return action
+        action = action.squeeze(0).detach().cpu().numpy()
+        return action[self.job_config.used_action_channel_ids]
     
     def _repeat_input_for_cfg(self, input_dict):
         if self.use_cfg:
@@ -614,21 +409,13 @@ class VA_Server:
                                             batch_size = 2 if self.use_cfg else 1
                                             )
 
-        self.predicted_actions = None
-
         self.action_mask = torch.zeros([self.job_config.action_dim]).bool()
         self.action_mask[self.job_config.used_action_channel_ids] = True
 
-        used_ids    = np.array(self.job_config.used_action_channel_ids)
-        inverse_ids = np.array(self.job_config.inverse_used_action_channel_ids)
-        q01 = np.array(self.job_config.norm_stat['q01'], dtype=np.float32)
-        q99 = np.array(self.job_config.norm_stat['q99'], dtype=np.float32)
-        q01_used = np.pad(q01[used_ids], (0, 1))   # (n_used+1,)
-        q99_used = np.pad(q99[used_ids], (0, 1))   # (n_used+1,)
-        self.q01 = q01_used[inverse_ids]            # (C_model,)
-        self.q99 = q99_used[inverse_ids]            # (C_model,)
-        self.action_valid = inverse_ids < len(used_ids)   # (C_model,) bool
-
+        self.actions_q01 = torch.tensor(self.job_config.norm_stat['q01'],
+                                        dtype=torch.float32).reshape(-1, 1, 1)
+        self.actions_q99 = torch.tensor(self.job_config.norm_stat['q99'],
+                                        dtype=torch.float32).reshape(-1, 1, 1)
         self.action_norm_method = self.job_config.action_norm_method
 
         ##### get prompt
@@ -647,7 +434,7 @@ class VA_Server:
                 dtype=self.dtype,
             )
 
-        self.exp_name = f"{time.strftime('%Y%m%d_%H%M%S')}"
+        self.exp_name = f"{prompt}_{time.strftime('%Y%m%d_%H%M%S')}" if prompt else "default"
         self.exp_save_root = os.path.join(self.save_root, 'real', self.exp_name)
         os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
@@ -774,9 +561,6 @@ class VA_Server:
 
         actions[:, ~self.action_mask] *= 0
 
-        # Buffer predicted actions for use as KV-cache action conditioning on the next call.
-        self.predicted_actions = actions.clone()
-
         save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
         save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
 
@@ -789,25 +573,13 @@ class VA_Server:
         self.transformer.clear_pred_cache(self.cache_name)
         save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
         latent_model_input = self._encode_obs(obs)
+        if self.frame_st_id == 0:
+            latent_model_input = torch.cat(
+                [self.init_latent, latent_model_input],
+                dim=2) if latent_model_input is not None else self.init_latent
 
-        # Determine action conditioning:
-        #   - If obs['state'] is provided (non-None), use preprocess_action for backward
-        #     compatibility with clients that send real robot state.
-        #   - Otherwise use the buffered predicted actions from the previous _infer call.
-        #     This is the normal inference path: the robot sends no state, and we rely on
-        #     the model's own predictions as conditioning (as agreed, prediction error is
-        #     assumed small enough to be negligible).
-        state = obs.get('state', None)
-        if state is not None:
-            action_model_input = self.preprocess_action(state).to(latent_model_input)
-        else:
-            if self.predicted_actions is None:
-                raise RuntimeError(
-                    "_compute_kv_cache called before any _infer; "
-                    "predicted_actions is None. Send obs['state'] on the first call "
-                    "or ensure _infer runs before _compute_kv_cache."
-                )
-            action_model_input = self.predicted_actions.to(latent_model_input)
+        action_model_input = self.preprocess_action(obs['state'])
+        action_model_input = action_model_input.to(latent_model_input)
         logger.info(
             f"get KV cache obs: {latent_model_input.shape} {action_model_input.shape}"
         )
@@ -904,17 +676,13 @@ class VA_Server:
 def run(args):    
     
     config = VA_CONFIGS[args.config_name]
-    ### added by lhc
-    config.wan22_finetuned_model_name_or_path = args.eval_model_path
-
     port = config.port if args.port is None else args.port
     if args.save_root is not None:
         config.save_root = args.save_root
     rank = int(os.getenv("RANK", 0))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
-    if world_size > 1:
-        init_distributed(world_size, local_rank, rank)
+    init_distributed(world_size, local_rank, rank)
     config.rank = rank
     config.local_rank = local_rank
     config.world_size = world_size
@@ -924,11 +692,7 @@ def run(args):
         model.generate()
     elif config.infer_mode == 'server':
         logger.info(f"******************************USE Server mode******************************")
-        metadata = {
-            'action_per_frame': config.action_per_frame,
-            'frame_chunk_size': config.frame_chunk_size,
-        }
-        run_async_server_mode(model, local_rank, config.host, port, metadata=metadata)
+        run_async_server_mode(model, local_rank, config.host, port)
     else:
         raise ValueError(f"Unknown infer mode: {config.infer_mode}")
 
@@ -955,12 +719,6 @@ def main():
         type=str,
         default=None,
         help='save root'
-    )
-    parser.add_argument(
-        "--eval_model_path",
-        type=str,
-        default=None,
-        help='eval model path'
     )
     args = parser.parse_args()
     run(args)

@@ -16,6 +16,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from wan_va.configs import VA_CONFIGS
 
+# DATASET_DIR = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/"
+DATASET_DIR = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/ur5e/"
 
 def parse_channel_ids(value: str) -> List[int]:
     # Accept formats like: "0,1,2" or "0 1 2"
@@ -91,6 +93,7 @@ def compute_q01_q99_parquet(
     inverse_ids: Optional[List[int]] = None,
 ):
     parquet_pattern = os.path.join(dataset_root, "data", "**", "episode_*.parquet")
+    print("finding files under ", parquet_pattern)
     files = sorted(glob.glob(parquet_pattern, recursive=True))
     if not files:
         raise FileNotFoundError(f"No parquet files found under: {parquet_pattern}")
@@ -138,10 +141,10 @@ def main():
         description="Compute q01/q99 from LeRobot parquet action field and print paste-ready norm_stat."
     )
     parser.add_argument(
-        "--dataset-root",
+        "--repo-name",
         type=str,
         required=True,
-        help="Path to dataset root (contains data/chunk-*/episode_*.parquet).",
+        help="repo name under the huggingface dir",
     )
     parser.add_argument(
         "--key",
@@ -203,7 +206,7 @@ def main():
         inverse_ids = build_inverse_ids(effective_action_dim, used_ids)
 
     q01, q99, shape = compute_q01_q99_parquet(
-        dataset_root=args.dataset_root,
+        dataset_root=DATASET_DIR+args.repo_name,
         key=args.key,
         sample_ratio=args.sample_ratio,
         seed=args.seed,

@@ -298,71 +298,49 @@ class LatentLeRobotDataset(LeRobotDataset):
     #     return torch.from_numpy(action_aligned).float(), torch.from_numpy(action_mask_aligned).bool()
 
     
-    def _action_post_process(self, local_start_frame, latent_frame_ids, action, latent_frame_num):
-        """
-        Build the (C, F, N, 1) action tensor that aligns with the VAE latent frames.
-
-        Alignment:
-          latent frame f  ←→  action rows [f*N : (f+1)*N]
-          where N = action_per_frame = frame_stride * 4.
-
-        The HF fetch in __getitem__ already provides enough rows to cover all F*N
-        slots, clamped to episode length.  If the episode ends before F*N rows are
-        available (last chunk of an episode), the deficit is zero-padded here and
-        the corresponding mask entries are set to False so those slots are excluded
-        from the training loss.
-
-        act_shift handles the rare case where action_config.start_frame differs
-        from latent_frame_ids[0] (e.g. stale action_config from an older extraction
-        run).  For freshly extracted data this is always 0.
-        """
-        act_shift = int(latent_frame_ids[0]) - local_start_frame
-        frame_stride = int(latent_frame_ids[1] - latent_frame_ids[0])
+    # MYEDIT: Fixed the numerical error of normalizing the padded actions in time dimension (stride * 4) and use them as supervision for now; but the timesteps are still
+    # MYEDIT: not correctly aligned. currently frame_stride is the video preprocessing downsampling rate, the video then further downsampled through the VAE. 
+    # MYEDIT: The actions are retrieved for [start_frame : end_frame + 2] and then padded with fs*4 to account for the fact that the first latent frame only get fs*1
+    # MYEDIT: actions but each latent frame should correspond to fs*4 actions because of the VAE downsampling. current implementation pads fs*4 at the beginning, 
+    # MYEDIT: effectively shifting all actions by one latent frame. The original implementation also silently drops the frame of the action corresponding to the last 
+    # MYEDIT: frame, which is clearly wrong.
+    def _action_post_process(self, local_start_frame, local_end_frame, latent_frame_ids, action):
+        act_shift = int(latent_frame_ids[0] - local_start_frame)
+        frame_stride = latent_frame_ids[1] - latent_frame_ids[0]
         action = action[act_shift:]
-
-        if self.config.env_type == 'robotwin_tshape':
-            left_action  = get_relative_pose(action[:, :7])
+        if self.config.env_type == 'robotwin_tshape': ## TODO support get_relative_pose for other dataset, currently only support robotwin 
+            left_action = get_relative_pose(action[:, :7])
             right_action = get_relative_pose(action[:, 8:15])
-            action = np.concatenate(
-                [left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1
-            )
+            action = np.concatenate([left_action, action[:, 7:8], right_action, action[:, 15:16]], axis=1)
+        pad_len = frame_stride * 4
+        # Build validity mask before temporal padding so padded timesteps stay invalid.
+        action_mask = np.ones_like(action, dtype='bool')
+        action = np.pad(action, pad_width=((pad_len, 0), (0, 0)), mode='constant', constant_values=0)
+        action_mask = np.pad(action_mask, pad_width=((pad_len, 0), (0, 0)), mode='constant', constant_values=False)
 
+        latent_frame_num = (len(latent_frame_ids) - 1) // 4 + 1
         required_action_num = latent_frame_num * frame_stride * 4
 
-        # Validity mask: True for real action rows, False for episode-end padding.
-        # Created before any padding so only genuine rows are marked valid.
-        available = action.shape[0]
-        action_mask = np.ones_like(action, dtype='bool')
+        action = action[:required_action_num]
+        action_mask = action_mask[:required_action_num]
+        assert action.shape[0] == required_action_num
 
-        # 万一动作数据异常，padding到足够的长度，并且mask掉padding的部分
-        if available < required_action_num:
-            # Last chunk of an episode: pad the deficit with zeros and mask them out.
-            deficit = required_action_num - available
-            action      = np.pad(action,      ((0, deficit), (0, 0)), mode='constant', constant_values=0)
-            action_mask = np.pad(action_mask, ((0, deficit), (0, 0)), mode='constant', constant_values=False)
-        else:
-            action      = action[:required_action_num]
-            action_mask = action_mask[:required_action_num]
-
-        assert action.shape[0] == required_action_num, (
-            f"action shape {action.shape[0]} != required {required_action_num}"
-        )
-
-        # 加一列0用于被inverse_used_action_channel_ids索引到，表示不使用的动作维度会被映射到这一列，后续归一化和训练时自然被0填充，不影响训练。
-        action_paded      = np.pad(action,      ((0, 0), (0, 1)), mode='constant', constant_values=0)
+        # COMMENT: incoming action: original shape, no padding; inverse_used_action_channel_ids: dim=30, each mapping to the index of the 
+        # COMMENT: corresponding channel in the original action, not used channels points to action_dim + 1, here would be the additional padded 0 dimension.
+        action_paded = np.pad(action, ((0, 0), (0, 1)), mode='constant', constant_values=0)
         action_mask_padded = np.pad(action_mask, ((0, 0), (0, 1)), mode='constant', constant_values=0)
 
-        action_aligned      = action_paded[:,       self.config.inverse_used_action_channel_ids]
-        action_mask_aligned = action_mask_padded[:,  self.config.inverse_used_action_channel_ids]
-
+        action_aligned = action_paded[:, self.config.inverse_used_action_channel_ids]
+        action_mask_aligned = action_mask_padded[:, self.config.inverse_used_action_channel_ids]
         denom = np.maximum(self.q99 - self.q01, 1e-2)
         action_aligned = np.where(
             action_mask_aligned,
             (action_aligned - self.q01) / (denom + 1e-6) * 2. - 1.,
             0.0,
         )
-
-        action_aligned      = rearrange(action_aligned,      "(f n) c -> c f n 1", f=latent_frame_num)
+        # print("normalized action: ", action_aligned[16])
+        # print("action norm: ", torch.linalg.norm(torch.from_numpy(action_aligned[16])))
+        action_aligned = rearrange(action_aligned, "(f n) c -> c f n 1", f=latent_frame_num)
         action_mask_aligned = rearrange(action_mask_aligned, "(f n) c -> c f n 1", f=latent_frame_num)
         action_aligned *= action_mask_aligned
         return torch.from_numpy(action_aligned).float(), torch.from_numpy(action_mask_aligned).bool()
@@ -370,35 +348,23 @@ class LatentLeRobotDataset(LeRobotDataset):
     def __getitem__(self, idx) -> dict:
         idx = idx % len(self.new_metas)
         cur_meta = self.new_metas[idx]
-        episode_index    = cur_meta["episode_index"]
-        local_start_frame = cur_meta["start_frame"]
-        local_end_frame   = cur_meta["end_frame"]
+        episode_index = cur_meta["episode_index"]
+        start_frame = cur_meta["start_frame"]
+        end_frame = cur_meta["end_frame"]
+        local_start_frame = start_frame
+        local_end_frame = end_frame
 
-        ori_data_dict = self._get_range_latent_data(local_start_frame, local_end_frame, episode_index)
+        ori_data_dict = self._get_range_latent_data(start_frame, end_frame, episode_index)
 
-        # 对应的是被VAE编码之前，降采样后的帧id
         latent_frame_ids = ori_data_dict[f"{self.used_video_keys[0]}.frame_ids"]
+        start_frame = self._get_global_idx(episode_index, start_frame)
+        end_frame = self._get_global_idx(episode_index, end_frame)
 
-        # Compute how many action rows we need: one action_per_frame slot per latent frame.
-        # frame_stride and latent_frame_num are derived from the latent file itself so this
-        # stays correct even if action_config was generated by an older extraction run.
-        frame_stride        = int(latent_frame_ids[1] - latent_frame_ids[0])
-        latent_frame_num    = (len(latent_frame_ids) - 1) // 4 + 1
-        required_action_num = latent_frame_num * frame_stride * 4
-        act_shift           = int(latent_frame_ids[0]) - local_start_frame
-
-        # 动作取到当前chunk最后frame对应的位置
-        ep_global_end      = int(self.episode_data_index["to"][episode_index])
-        global_start       = self._get_global_idx(episode_index, local_start_frame)
-        action_fetch_end   = min(global_start + act_shift + required_action_num, ep_global_end)
-
-        hf_data_frames = self._get_range_hf_data(global_start, action_fetch_end)
+        hf_data_frames = self._get_range_hf_data(start_frame, end_frame)
         ori_data_dict.update(hf_data_frames)
         out_dict = self._cat_video_latents(ori_data_dict)
 
-        out_dict['actions'], out_dict['actions_mask'] = self._action_post_process(
-            local_start_frame, latent_frame_ids, ori_data_dict['action'], latent_frame_num
-        )
+        out_dict['actions'], out_dict['actions_mask'] = self._action_post_process(local_start_frame, local_end_frame, latent_frame_ids, ori_data_dict['action'])
 
         out_dict['latents'] = out_dict['latents'].permute(3, 0, 1, 2)
         return out_dict

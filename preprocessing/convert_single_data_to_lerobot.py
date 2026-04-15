@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union
 import glob
 import subprocess
+import threading
+import queue
 from multiprocessing import Pool, cpu_count
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -22,12 +24,12 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # 配置常量
 HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
-RAW_DATASET_NAMES = ["set_the_plates"]  # 请修改为实际数据集名称
 PUSH_TO_HUB = False
 # NOTE: keep NUM_WORKERS small (4–8). Each worker loads full video frames into
 # memory and returns large numpy arrays through the IPC pipe. 80 workers ×
 # ~300MB/episode = ~24GB peak — this causes silent OOM kills on the cluster.
-NUM_WORKERS = 8
+NUM_WORKERS = 2
+PREFETCH_QUEUE_SIZE = 32
 DATA_DIR = "/liujinxin/dataset/robochallenge/"
 
 # 摄像头CSV文件默认路径（相对于脚本所在目录）
@@ -475,23 +477,19 @@ def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[
         episode_data = []
 
         for index in range(valid_len):
-            eef_state = np.array(states_data[index].get('ee_positions', np.zeros(7)), dtype=np.float32)
-            eef_action = np.array(states_data[index + 1].get('ee_positions', np.zeros(7)), dtype=np.float32)
             joints_state = np.array(states_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
             joints_action = np.array(states_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
             gripper_state = float(states_data[index].get('gripper', 0.0))
             gripper_action = float(states_data[index + 1].get('gripper', 0.0))
 
-            # state: eef(7) + joints(6) + gripper(1) = 14
+            # state: joints(6) + gripper(1) = 7
             state = np.concatenate((
-                eef_state,
                 joints_state,
                 np.array([gripper_state], dtype=np.float32),
             ))
 
-            # action: eef(7) + joints(6) + gripper(1) = 14
+            # action: joints(6) + gripper(1) = 7
             action = np.concatenate((
-                eef_action,
                 joints_action,
                 np.array([gripper_action], dtype=np.float32),
             ))
@@ -574,23 +572,19 @@ def process_episode_with_frames(episode: EpisodeStateFiles, global_task_info: Op
         episode_data = []
 
         for index in range(valid_len):
-            eef_state = np.array(states_data[index].get('ee_positions', np.zeros(7)), dtype=np.float32)
-            eef_action = np.array(states_data[index + 1].get('ee_positions', np.zeros(7)), dtype=np.float32)
             joints_state = np.array(states_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
             joints_action = np.array(states_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
             gripper_state = float(states_data[index].get('gripper', 0.0))
             gripper_action = float(states_data[index + 1].get('gripper', 0.0))
 
-            # state: eef(7) + joints(6) + gripper(1) = 14
+            # state: joints(6) + gripper(1) = 7
             state = np.concatenate((
-                eef_state,
                 joints_state,
                 np.array([gripper_state], dtype=np.float32),
             ))
 
-            # action: eef(7) + joints(6) + gripper(1) = 14
+            # action: joints(6) + gripper(1) = 7
             action = np.concatenate((
-                eef_action,
                 joints_action,
                 np.array([gripper_action], dtype=np.float32),
             ))
@@ -614,6 +608,117 @@ def process_episode_with_frames(episode: EpisodeStateFiles, global_task_info: Op
         import traceback
         traceback.print_exc()
         return ([], "", "")
+
+
+def _read_task_and_prompt(global_task_info: Optional[Dict], global_video_prompt: Optional[str]) -> Tuple[str, str]:
+    tasks = ""
+    if global_task_info:
+        if isinstance(global_task_info, list) and len(global_task_info) > 0:
+            if 'task_desc' in global_task_info[0] and 'prompt' in global_task_info[0]['task_desc']:
+                tasks = global_task_info[0]['task_desc']['prompt']
+            elif 'task' in global_task_info[0]:
+                tasks = global_task_info[0]['task']
+        elif isinstance(global_task_info, dict):
+            if 'task_desc' in global_task_info and 'prompt' in global_task_info['task_desc']:
+                tasks = global_task_info['task_desc']['prompt']
+            elif 'task' in global_task_info:
+                tasks = global_task_info['task']
+    video_prompt = global_video_prompt if global_video_prompt else ""
+    return tasks, video_prompt
+
+
+def process_episode_stream_to_dataset(
+    episode: EpisodeStateFiles,
+    dataset: LeRobotDataset,
+    camera_config: Dict[str, Optional[str]],
+    global_task_info: Optional[Dict] = None,
+    global_video_prompt: Optional[str] = None,
+) -> int:
+    """
+    Stream one episode directly into LeRobotDataset without building large frame
+    arrays in worker processes. This drastically lowers RAM usage.
+
+    Returns:
+        number of frames written for this episode
+    """
+    states_data = read_jsonl_file(episode.states_file) if episode.states_file else []
+    if len(states_data) < 2:
+        return 0
+
+    valid_len = len(states_data) - 1
+    tasks, _ = _read_task_and_prompt(global_task_info, global_video_prompt)
+
+    caps = {}
+    if camera_config.get('main') and episode.main_camera_video and os.path.exists(episode.main_camera_video):
+        caps['top'] = cv2.VideoCapture(episode.main_camera_video)
+    if camera_config.get('wrist') and episode.wrist_camera_video and os.path.exists(episode.wrist_camera_video):
+        caps['wrist'] = cv2.VideoCapture(episode.wrist_camera_video)
+    if camera_config.get('scene') and episode.scene_camera_video and os.path.exists(episode.scene_camera_video):
+        caps['scene'] = cv2.VideoCapture(episode.scene_camera_video)
+
+    frame_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
+    sentinel = {"__done__": True}
+
+    def _producer() -> None:
+        try:
+            for _ in range(valid_len):
+                out: Dict[str, Any] = {}
+                for out_key, cap_key in [('observation.images.top', 'top'),
+                                         ('observation.images.wrist', 'wrist'),
+                                         ('observation.images.scene', 'scene')]:
+                    if out_key == 'observation.images.scene' and not camera_config.get('scene'):
+                        continue
+                    cap = caps.get(cap_key)
+                    if cap is None:
+                        out[out_key] = None
+                        continue
+                    ret, frame = cap.read()
+                    if not ret:
+                        out[out_key] = None
+                    else:
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        out[out_key] = cv2.resize(frame_rgb, (256, 256))
+                frame_queue.put(out)
+        except Exception as exc:
+            frame_queue.put({"__error__": str(exc)})
+        finally:
+            frame_queue.put(sentinel)
+
+    written = 0
+    producer = threading.Thread(target=_producer, daemon=True)
+    producer.start()
+    try:
+        for index in range(valid_len):
+            joints_state = np.array(states_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
+            joints_action = np.array(states_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
+            gripper_state = float(states_data[index].get('gripper', 0.0))
+            gripper_action = float(states_data[index + 1].get('gripper', 0.0))
+
+            state = np.concatenate((joints_state, np.array([gripper_state], dtype=np.float32)))
+            action = np.concatenate((joints_action, np.array([gripper_action], dtype=np.float32)))
+
+            frame_dict = {
+                'action': action,
+                'observation.state': state,
+            }
+
+            frame_item = frame_queue.get()
+            if frame_item is sentinel or frame_item.get("__done__"):
+                break
+            if "__error__" in frame_item:
+                raise RuntimeError(f"Frame producer failed: {frame_item['__error__']}")
+            frame_dict.update(frame_item)
+
+            dataset.add_frame(frame_dict, task=tasks)
+            written += 1
+    finally:
+        producer.join()
+        for cap in caps.values():
+            cap.release()
+
+    if written > 0:
+        dataset.save_episode()
+    return written
 
 
 def process_episode_batch(episodes: List[EpisodeStateFiles], include_frames: bool = False,
@@ -730,6 +835,7 @@ def _process_frames_wrapper(args):
 
 
 def main(repo_name: str,
+         raw_dataset: List[str],
          data_dir: str = DATA_DIR, 
          robot_type: Optional[str] = None,
          include_frames: bool = True, num_episodes: Optional[int] = None,
@@ -751,7 +857,7 @@ def main(repo_name: str,
         known_single_arm_types = get_single_arm_robot_types(cameras_csv)
         print(f"已知单臂机器人类型: {known_single_arm_types}")
 
-        first_dataset_path = os.path.join(data_dir, RAW_DATASET_NAMES[0])
+        first_dataset_path = os.path.join(data_dir, raw_dataset[0])
         _, _, first_task_info, _ = load_global_metadata(first_dataset_path)
 
         if first_task_info is None:
@@ -818,12 +924,12 @@ def main(repo_name: str,
         "observation.images.wrist": video_feature,
         "observation.state": {
             "dtype": "float32",
-            "shape": (14,),
+            "shape": (7,),
             "names": ["motors"],
         },
         "action": {
             "dtype": "float32",
-            "shape": (14,),
+            "shape": (7,),
             "names": ["motors"],
         },
     }
@@ -848,7 +954,7 @@ def main(repo_name: str,
 
     known_single_arm_types = get_single_arm_robot_types(cameras_csv)
 
-    for raw_dataset_name in RAW_DATASET_NAMES:
+    for raw_dataset_name in raw_dataset:
         print(f"\n处理数据集: {raw_dataset_name}")
         raw_dataset_path = os.path.join(data_dir, raw_dataset_name)
 
@@ -897,53 +1003,57 @@ def main(repo_name: str,
     print_episode_info(shuffled_episodes, "\n待处理的Episode列表")
 
     if include_frames:
-        process_func = process_episode_with_frames
         print("\n使用完整模式（包含视频帧）...")
+        print("启用流式写入（单进程）以降低内存占用并避免多进程大数组拷贝。")
+        for i, episode in enumerate(shuffled_episodes):
+            metadata = main.global_metadata.get(episode.dataset_name, {'task_info': None, 'video_prompt': None})
+            written = process_episode_stream_to_dataset(
+                episode=episode,
+                dataset=dataset,
+                camera_config=camera_config,
+                global_task_info=metadata['task_info'],
+                global_video_prompt=metadata['video_prompt'],
+            )
+            if written == 0:
+                print(f"  [{i+1}/{len(shuffled_episodes)}] 跳过空的episode {episode.episode_num}")
+            else:
+                print(f"  [{i+1}/{len(shuffled_episodes)}] 写入episode {episode.episode_num}: {written}个时间步")
     else:
         process_func = process_episode_fast
         print("\n使用快速模式（仅状态和动作）...")
 
-    num_processes = min(cpu_count(), NUM_WORKERS)
-    print(f"使用 {num_processes} 个进程并行处理...")
+        num_processes = min(cpu_count(), NUM_WORKERS)
+        print(f"使用 {num_processes} 个进程并行处理...")
 
-    process_args = []
-    for episode in shuffled_episodes:
-        dataset_name = episode.dataset_name
-        metadata = main.global_metadata.get(dataset_name, {'task_info': None, 'video_prompt': None})
-        process_args.append((episode, metadata['task_info'], metadata['video_prompt']))
+        process_args = []
+        for episode in shuffled_episodes:
+            dataset_name = episode.dataset_name
+            metadata = main.global_metadata.get(dataset_name, {'task_info': None, 'video_prompt': None})
+            process_args.append((episode, metadata['task_info'], metadata['video_prompt']))
 
-    wrapper = _process_frames_wrapper if include_frames else _process_fast_wrapper
+        # Use imap (chunksize=1) instead of starmap so each episode's result is
+        # consumed and freed immediately after writing, rather than accumulating
+        # all NUM_WORKERS results in memory at once.
+        with Pool(processes=num_processes) as pool:
+            for i, (episode_data, tasks, video_prompt) in enumerate(
+                pool.imap(_process_fast_wrapper, process_args, chunksize=1)
+            ):
+                episode = shuffled_episodes[i]
 
-    # Use imap (chunksize=1) instead of starmap so each episode's result is
-    # consumed and freed immediately after writing, rather than accumulating
-    # all NUM_WORKERS results in memory at once.
-    with Pool(processes=num_processes) as pool:
-        for i, (episode_data, tasks, video_prompt) in enumerate(
-            pool.imap(wrapper, process_args, chunksize=1)
-        ):
-            episode = shuffled_episodes[i]
+                if not episode_data:
+                    print(f"  [{i+1}/{len(process_args)}] 跳过空的episode {episode.episode_num}")
+                    continue
 
-            if not episode_data:
-                print(f"  [{i+1}/{len(process_args)}] 跳过空的episode {episode.episode_num}")
-                continue
+                print(f"  [{i+1}/{len(process_args)}] 添加episode {episode.episode_num}: {len(episode_data)}个时间步")
 
-            print(f"  [{i+1}/{len(process_args)}] 添加episode {episode.episode_num}: {len(episode_data)}个时间步")
+                for frame_data in episode_data:
+                    frame_dict = {
+                        'action': frame_data['action'],
+                        'observation.state': frame_data['state'],
+                    }
+                    dataset.add_frame(frame_dict, task=tasks)
 
-            for frame_data in episode_data:
-                frame_dict = {
-                    'action': frame_data['action'],
-                    'observation.state': frame_data['state'],
-                }
-
-                if include_frames and 'frames' in frame_data:
-                    frame_dict['observation.images.top'] = frame_data['frames'].get('top')
-                    frame_dict['observation.images.wrist'] = frame_data['frames'].get('wrist')
-                    if camera_config['scene']:
-                        frame_dict['observation.images.scene'] = frame_data['frames'].get('scene')
-
-                dataset.add_frame(frame_dict, task=tasks)
-
-            dataset.save_episode()
+                dataset.save_episode()
 
     episode_time = time.time() - start_time
     print(f"\n所有episode处理完成，耗时: {episode_time:.2f}秒")

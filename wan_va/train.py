@@ -491,7 +491,9 @@ class Trainer:
 
                 if self.config.rank == 0:
                     total_norm = losses['total_norm']
-                    progress_bar.n += self.gradient_accumulation_steps
+                    # Progress bar total is in optimizer steps (num_steps), so
+                    # update by 1 after each optimizer step.
+                    progress_bar.update(1)
                     progress_bar.set_postfix({
                         'latent_loss': f'{latent_loss_show:.4f}',
                         'action_loss': f'{action_loss_show:.4f}',
@@ -537,9 +539,6 @@ class Trainer:
                     if self.config.rank == 0:
                         logger.info(f"Starting save model at step {self.step}")
                     self.save_checkpoint()
-
-            if dist.is_initialized():
-                dist.barrier()
 
         progress_bar.close()
         logger.info("Training completed!")

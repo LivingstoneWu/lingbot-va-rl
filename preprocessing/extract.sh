@@ -10,7 +10,7 @@ BATCH_SIZE=160
 if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
   torchrun --nproc_per_node "${NPROC_PER_NODE}" "${SCRIPT_DIR}/extract_latent_vae.py" \
     --config-name "demo" \
-    --dataset-root "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/set_the_plates" \
+    --dataset-root "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/arrange_fruits_in_basket" \
     --camera-keys "top" "left_wrist" "right_wrist" \
     --target-fps "15" \
     --height "256" \
@@ -20,7 +20,7 @@ if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
 else
   python "${SCRIPT_DIR}/extract_latent_vae.py" \
     --config-name "demo" \
-    --dataset-root "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/set_the_plates" \
+    --dataset-root "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/arrange_fruits_in_basket" \
     --camera-keys "top" "left_wrist" "right_wrist" \
     --target-fps "15" \
     --height "256" \

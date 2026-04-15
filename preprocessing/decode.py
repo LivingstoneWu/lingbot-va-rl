@@ -248,11 +248,17 @@ def decode_and_save(vae_encoder, pth_path, save_path, use_cpu=False, chunk_size=
     解码并保存视频
     """
     # 加载latent数据
-    data = torch.load(pth_path, map_location='cpu', weights_only=False)
-    latent = data['latent']
-    F_lat = data['latent_num_frames']
-    H_lat = data['latent_height']
-    W_lat = data['latent_width']
+    # data = torch.load(pth_path, map_location='cpu', weights_only=False)
+    # latent = data['latent']
+    # F_lat = data['latent_num_frames']
+    # H_lat = data['latent_height']
+    # W_lat = data['latent_width']
+
+    latent = torch.load(pth_path, map_location='cpu', weights_only=False)
+    latent = latent.squeeze(0)
+    F_lat = 4
+    H_lat = 16
+    W_lat = 40
     
     print(f"Loading latent: {latent.shape}, F_lat={F_lat}, H_lat={H_lat}, W_lat={W_lat}")
     
@@ -331,14 +337,15 @@ if __name__ == "__main__":
     # 读取latents.pth
     #pth_path ='/liujinxin/code/lhc/lingbot-va/pick-n-place-sq-lerobot-v21/latents/chunk-000/observation.images.top/episode_000000_0_264.pth'
     #pth_path ='/liujinxin/code/lhc/lingbot-va/pick-n-place-sq-lerobot-v21/latents_generate/chunk-000/observation.images.top/episode_000000_000000_000264.pth'
-    pth_path = '/liujinxin/code/lhc/lingbot-va/datasets/robochallenge/turn_on_faucet_trim/latents/chunk-000/observation.images.top/episode_000000_0_518.pth'
+    pth_path = '/liujinxin/code/lhc/wy/wms/lingbot-va/checkpoints/rc_stack_color_blocks/bs16lr2.5e-5/real/stack the yellow block on top of the orange block_20260410_100526/latents_0.pt'
 
 
     decode_and_save(
         vae_encoder=vae_encoder,
         pth_path=pth_path,
-        save_path='./output_video.mp4',
+        save_path='./stack_color_blocks.mp4',
         fps=15,
+        chunk_size=2,
         )
 
 

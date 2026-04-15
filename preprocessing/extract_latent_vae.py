@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image
@@ -658,6 +659,15 @@ def main():
     config.local_rank = env_local_rank
     device = torch.device(f"cuda:{env_local_rank}")
     logger.info(f"Distributed shard: rank={rank}, world_size={world_size}, local_rank={env_local_rank}")
+
+    if world_size > 1 and not dist.is_initialized():
+        torch.cuda.set_device(env_local_rank)
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+        )
     
     # 初始化组件
     logger.info("Initializing VAE encoder...")
@@ -764,12 +774,15 @@ def main():
     logger.info(f"Latent extraction completed! Processed {total_episodes} episodes, {total_chunks} chunks")
 
     # 所有rank完成后，由rank 0更新episodes.jsonl中的action_config
-    if world_size > 1:
-        import torch.distributed as dist
+    if world_size > 1 and dist.is_initialized():
         dist.barrier()
 
     if rank == 0:
         update_episodes_jsonl(dataset_root, meta_dir, latents_dir)
+
+    if world_size > 1 and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

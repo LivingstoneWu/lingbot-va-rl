@@ -9,3 +9,7 @@ train_out
 *.gz
 checkpoints
 .DS_Store
+RoboChallengeInference
+datasets_ori
+inf_out/
+received_data_request/
