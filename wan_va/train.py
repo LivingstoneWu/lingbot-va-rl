@@ -47,6 +47,30 @@ from utils import (
 from dataset import MultiLatentLeRobotDataset
 import gc
 
+
+def _config_to_dict(cfg) -> dict:
+    """Recursively convert an EasyDict config to a plain dict safe for json.dump.
+
+    Values that are not natively JSON-serialisable (e.g. torch.dtype, Path,
+    numpy arrays) are converted to their str() representation so the file
+    stays human-readable without losing any information.
+    """
+    import torch
+    _NATIVE = (bool, int, float, str, type(None))
+
+    def _convert(v):
+        if isinstance(v, dict):
+            return {str(k): _convert(vv) for k, vv in v.items()}
+        if isinstance(v, (list, tuple)):
+            converted = [_convert(x) for x in v]
+            return converted
+        if isinstance(v, _NATIVE):
+            return v
+        # torch.dtype, Path, numpy scalars, …
+        return str(v)
+
+    return _convert(dict(cfg))
+
 from contextlib import nullcontext
 # import setproctitle
 # setproctitle.setproctitle('lingbot_lhc')
@@ -152,9 +176,6 @@ class Trainer:
             shuffle=(train_sampler is None), 
             num_workers=config.load_worker,
             sampler=train_sampler,
-            pin_memory=True,          # allows non-blocking CPU→GPU transfer
-            persistent_workers=True,  # avoids worker respawn overhead at epoch boundary
-            prefetch_factor=2,
         )
 
         self.train_scheduler_latent = FlowMatchScheduler(shift=self.config.snr_shift, sigma_min=0.0, extra_one_step=True)
@@ -165,6 +186,12 @@ class Trainer:
         self.save_dir = Path(config.save_root) / "checkpoints"
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.log_file = self.save_dir / 'log.jsonl'
+
+        if config.rank == 0:
+            config_save_path = self.save_dir / 'config.json'
+            with open(config_save_path, 'w') as _f:
+                json.dump(_config_to_dict(config), _f, indent=2)
+            logger.info(f"Config saved to {config_save_path}")
 
         self.gradient_accumulation_steps = getattr(config, 'gradient_accumulation_steps', 1)
         self.train_loader_iter = None
