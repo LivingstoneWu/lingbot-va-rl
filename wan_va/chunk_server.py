@@ -443,7 +443,7 @@ class MultiFrameInferenceServer:
                 # slot) with the robot's current state so the robot stays stationary
                 # instead of receiving a zero-action command.
                 if raw_action is not None:
-                    raw_action = np.asarray(raw_action, dtype=np.float32)
+                    raw_action = np.array(raw_action, dtype=np.float32)  # np.array always copies, avoiding read-only frombuffer views
                     initial_state_raw = frames_4[-1].get("state")
                     if initial_state_raw is not None:
                         initial_state = np.asarray(
@@ -466,7 +466,7 @@ class MultiFrameInferenceServer:
                 _ = self.send_compute_kv_cache(ws, kv_obs)  # state=None → use predicted_actions
                 final_action, _ = self.send_infer(ws, latest_obs)
                 if final_action is not None:
-                    final_action = np.asarray(final_action, dtype=np.float32)
+                    final_action = np.array(final_action, dtype=np.float32)  # np.array always copies
 
             self.call_count += 1
 
@@ -515,6 +515,13 @@ class MultiFrameInferenceServer:
                     "status": "error",
                     "message": str(e),
                 }), 500
+            
+        @self.app.post("/start")
+        def start():
+            print("[Server] restarting inference session.")
+            self.call_count = 0 
+
+            return {"status": "ok"}
 
     # =========================
     # Main

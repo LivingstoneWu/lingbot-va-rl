@@ -1,8 +1,24 @@
-find /liujinxin/code/lhc/wy/wms/lingbot-va/datasets/ur5e/ur5e_stack_color_blocks_action_corrected/videos \
-  -type f -name '*.mp4' -print0 |
-xargs -0 -n 1 -P 80 -I {} bash -c '
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robotwin/lingbot_posttrain_clean/lerobot_robotwin_eef_aug_500"
+NPROC=40
+
+find "$ROOT" -type d -name videos -print0 |
+while IFS= read -r -d '' video_dir; do
+  find "$video_dir" -type f -name '*.mp4' -print0
+done |
+xargs -0 -n 1 -P "$NPROC" bash -c '
   f="$1"
   tmp="${f%.mp4}.tmp.mp4"
-  ffmpeg -y -i "$f" -c:v libx264 -preset fast -crf 18 "$tmp" &&
-  mv "$tmp" "$f"
-' _ {}
+
+  echo "Processing: $f"
+
+  if ffmpeg -y -i "$f" -c:v libx264 -preset fast -crf 18 "$tmp"; then
+    mv "$tmp" "$f"
+  else
+    echo "Failed: $f" >&2
+    rm -f "$tmp"
+    exit 1
+  fi
+' _

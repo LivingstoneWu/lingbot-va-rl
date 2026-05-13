@@ -20,7 +20,7 @@ os.system('export WANDB_MODE=offline')
 def recursive_find_file(directory, filename='info.json'):
     result = []
     try:
-        for root, dirs, files in os.walk(directory, followlinks=True):
+        for root, dirs, files in os.walk(directory):
             if filename in files:
                 full_path = os.path.join(root, filename)
                 result.append(full_path)
@@ -50,12 +50,6 @@ def construct_lerobot_multi_processor(config,
     repo_list = recursive_find_file(config.dataset_path, 'info.json')
     repo_list = [v.split('/meta/info.json')[0] for v in repo_list]
     print('repo_list', len(repo_list))
-    if not repo_list:
-        raise RuntimeError(
-            f"No datasets found under dataset_path='{config.dataset_path}'. "
-            "Check that the path exists, contains symlinks or subdirectories with "
-            "meta/info.json, and that symlinks are not broken."
-        )
     ## 修改by lhc
     # with Pool(num_init_worker) as pool:
     #     datasets_out_lst = pool.map(construct_func, repo_list)
@@ -232,7 +226,7 @@ class LatentLeRobotDataset(LeRobotDataset):
             latent_file = (
                 cur_path / f"episode_{episode_index:06d}_{start_frame}_{end_frame}.pth"
             )
-            assert os.path.exists(latent_file), f"Missing latent file: {latent_file}"
+            assert os.path.exists(latent_file)
             latent_data = torch.load(latent_file, weights_only=False)
             out[key] = latent_data
         
@@ -325,28 +319,6 @@ class LatentLeRobotDataset(LeRobotDataset):
         act_shift = int(latent_frame_ids[0]) - local_start_frame
         frame_stride = int(latent_frame_ids[1] - latent_frame_ids[0])
         action = action[act_shift:]
-
-        # Pad HF action to a common width before slicing so that datasets without
-        # certain dimensions (e.g. mobile chassis/head) can share the same
-        # action_slicing_ids as datasets that do have them.  Missing dimensions are
-        # zero-padded, which trains the model to predict zero for those dims on
-        # non-mobile tasks — the correct ground truth.
-        # Set action_pad_to_dim to the widest HF action dim across all datasets.
-        # Omit (or set to None) to skip padding (backward compatible).
-        action_pad_to_dim = getattr(self.config, 'action_pad_to_dim', None)
-        if action_pad_to_dim is not None and action.shape[1] < action_pad_to_dim:
-            pad_width = action_pad_to_dim - action.shape[1]
-            action = np.pad(action, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
-
-        # Optional dim selection for datasets whose HF action column contains more
-        # dimensions than the pipeline expects.  action_slicing_ids is a list of
-        # integer column indices into the raw (T, D_hf) HF action tensor; the
-        # selected columns must be ordered to match used_action_channel_ids.
-        # Omit the key entirely for datasets that already have the right dims.
-        # 从原数据中截取要用的动作维度
-        action_slicing_ids = getattr(self.config, 'action_slicing_ids', None)
-        if action_slicing_ids is not None:
-            action = action[:, action_slicing_ids]   # (T, D_hf) → (T, n_used)
 
         if self.config.env_type == 'robotwin_tshape':
             left_action  = get_relative_pose(action[:, :7])
@@ -444,11 +416,7 @@ class LatentLeRobotDataset(LeRobotDataset):
         # Chunks vary in latent frame count (shorter at episode boundaries).
         # Padding to a fixed max lets the default collate stack a batch of B > 1.
         F_real = out_dict['latents'].shape[1]
-        # MYEDIT: noticed that padding with batch_size = 1 causes significant delays, only pad when batch_size > 1
-        if self.config.batch_size == 1:
-            F_max = F_real
-        else: 
-            F_max  = self.config.max_latent_frames
+        F_max  = self.config.max_latent_frames
         F_pad  = F_max - F_real
         assert F_pad >= 0, (
             f"Chunk has {F_real} latent frames but config.max_latent_frames={F_max}. "

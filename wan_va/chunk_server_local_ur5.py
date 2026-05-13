@@ -12,6 +12,19 @@ import numpy as np
 import websocket
 from flask import Flask, request, jsonify
 
+def pack_array(obj):
+    """Encode numpy arrays for msgpack in the format expected by the server's
+    msgpack_numpy.unpackb (object_hook=unpack_array)."""
+    if isinstance(obj, np.ndarray):
+        return {b"__ndarray__": True, b"data": obj.tobytes(),
+                b"dtype": obj.dtype.str, b"shape": obj.shape}
+    return obj
+
+# Image resolution sent to the WAN-VA server.  The server resizes anyway via
+# F.interpolate, so pre-resizing here reduces payload size without affecting
+# model input quality.
+OBS_IMG_SIZE = (256, 256)  # (width, height) for cv2.resize
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt used for the WAN-VA reset call on the first inference of each session.
 # Change this to match your task at launch time.
@@ -199,7 +212,9 @@ class MultiFrameInferenceServer:
     # =========================
     @staticmethod
     def send_obj(ws, obj):
-        payload = msgpack.packb(obj, use_bin_type=True)
+        # pack_array encodes numpy arrays as {b"__ndarray__": True, b"data": ...}
+        # which the server's msgpack_numpy.unpackb decodes back to numpy arrays.
+        payload = msgpack.packb(obj, default=pack_array, use_bin_type=True)
         print(f"[send_obj] type={type(obj)}, bytes={len(payload)}")
         ws.send(payload, opcode=websocket.ABNF.OPCODE_BINARY)
 
@@ -234,7 +249,14 @@ class MultiFrameInferenceServer:
     # Convert robot frame -> policy obs format
     # =========================
     def frame_to_policy_frame(self, frame: dict) -> dict:
-        """Decode raw JPEG bytes for each camera and re-key to model names."""
+        """Decode raw JPEG bytes for each camera, resize, and re-key to model names.
+
+        Images are pre-resized to OBS_IMG_SIZE and kept as uint8 numpy arrays.
+        The server's msgpack_numpy.unpackb decodes them back to numpy arrays
+        automatically, and _encode_obs resizes again to the model's exact
+        resolution via F.interpolate — so this pre-resize only reduces payload
+        size without affecting model input quality.
+        """
         out = {}
         for src_key, dst_key in self.OBS_KEY_MAP.items():
             img_bytes = frame.get(src_key)
@@ -243,7 +265,8 @@ class MultiFrameInferenceServer:
             img = self.decode_jpg_bytes(img_bytes)
             if img is None:
                 raise ValueError(f"Failed to decode image for key: {src_key}")
-            out[dst_key] = img.tolist()
+            img = cv2.resize(img, OBS_IMG_SIZE, interpolation=cv2.INTER_LINEAR)
+            out[dst_key] = img   # numpy uint8 (H, W, C) — serialised by pack_array
         return out
 
     def build_latest_obs(self, frames: list) -> dict:
@@ -340,13 +363,27 @@ class MultiFrameInferenceServer:
     # =========================
     # Websocket lifecycle
     # =========================
-    def init_ws_once(self):
+    def init_ws_once(self, max_retries=10, retry_delay=2.0):
         with self._ws_lock:
             if self._ws is not None:
                 return self._ws
 
             print(f"[connect] {self.WS_SERVER_URL}")
-            ws = websocket.create_connection(self.WS_SERVER_URL, timeout=600)
+            last_exc = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    ws = websocket.create_connection(self.WS_SERVER_URL, timeout=600)
+                    break
+                except Exception as e:
+                    last_exc = e
+                    print(f"[connect] attempt {attempt}/{max_retries} failed: {e}; "
+                          f"retrying in {retry_delay}s …")
+                    time.sleep(retry_delay)
+            else:
+                raise RuntimeError(
+                    f"Could not connect to {self.WS_SERVER_URL} "
+                    f"after {max_retries} attempts"
+                ) from last_exc
 
             metadata = self.recv_obj(ws)
             metadata = self.decode_possible_ndarray(metadata)
@@ -424,45 +461,65 @@ class MultiFrameInferenceServer:
         with self._ws_lock:
             ws = self.get_ws()
 
+            t_call_start = time.time()
+
             if self.call_count == 0:
-                # First call: send reset then infer directly (no KV history yet).
-                # Frame-0 action slot is conditioned on zeros per training convention;
-                # we patch those with the initial robot state so the robot holds position.
+                # First call: reset, then warm up KV cache with the current frame +
+                # actual robot state, then infer.  This gives the model the same
+                # single-frame context that all subsequent chunks have, avoiding the
+                # zero-conditioned first-chunk problem.
                 prompt = frames_4[-1].get("prompt") or self.DEFAULT_PROMPT
-                print(f"[handle_inference] call_count=0: sending reset, then infer directly")
+                print(f"[handle_inference] call_count=0: sending reset, KV warm-up, then infer")
                 print(f"[handle_inference] prompt: {prompt!r}")
+
+                t0 = time.time()
+                print("[timing] >>> reset (T5 encoding) ...")
                 self.send_reset(ws, prompt)
+                print(f"[timing] <<< reset done  ({time.time() - t0:.2f}s)")
 
+                # KV warm-up: 1 latent frame from the current observation + initial state.
+                # Single frame passed directly — VAE anchor requires only 1 input frame.
+                initial_state_raw = frames_4[-1].get("state")
+                initial_state_payload = (
+                    self.normalize_state(initial_state_raw)
+                    if initial_state_raw is not None else None
+                )
+                if initial_state_payload is None:
+                    print("[handle_inference] WARNING: no initial state; "
+                          "KV warm-up will skip action conditioning")
+
+                single_frame_kv_obs = self.build_latest_obs([frames_4[-1]])
+                t0 = time.time()
+                print("[timing] >>> KV warm-up  (VAE encode frame 0 + transformer cache) ...")
+                self.send_compute_kv_cache(ws, single_frame_kv_obs,
+                                           state_payload=initial_state_payload)
+                print(f"[timing] <<< KV warm-up done  ({time.time() - t0:.2f}s)")
+
+                t0 = time.time()
+                print("[timing] >>> infer (action + video denoising) ...")
                 raw_action, _ = self.send_infer(ws, latest_obs)
-
-                # Patch the first action_per_frame timesteps with the robot's current
-                # state to hold position instead of commanding zeros.
+                print(f"[timing] <<< infer done  ({time.time() - t0:.2f}s)")
                 if raw_action is not None:
-                    raw_action = np.array(raw_action, dtype=np.float32)  # always copies → writeable
-                    initial_state_raw = frames_4[-1].get("state")
-                    if initial_state_raw is not None:
-                        initial_state = np.asarray(
-                            self.normalize_state(initial_state_raw), dtype=np.float32
-                        )
-                        n_action_dims = raw_action.shape[1] if raw_action.ndim > 1 else raw_action.shape[0]
-                        n_copy = min(n_action_dims, initial_state.shape[0])
-                        print(f"[handle_inference] patching first {action_per_frame} "
-                              f"zero-slot actions with initial state (dims={n_copy})")
-                        raw_action[:action_per_frame, :n_copy] = initial_state[:n_copy]
-                    else:
-                        print("[handle_inference] WARNING: no initial state in frame; "
-                              "zero-slot actions left as zeros")
+                    raw_action = np.array(raw_action, dtype=np.float32)
 
                 final_action = raw_action
             else:
                 # Subsequent calls: update KV cache with repeated real observations,
                 # then run inference.
+                t0 = time.time()
+                print(f"[timing] >>> compute_kv_cache  (VAE encode + transformer cache, call={self.call_count}) ...")
                 _ = self.send_compute_kv_cache(ws, kv_obs)  # state=None → use predicted_actions
+                print(f"[timing] <<< compute_kv_cache done  ({time.time() - t0:.2f}s)")
+
+                t0 = time.time()
+                print(f"[timing] >>> infer  (action + video denoising, call={self.call_count}) ...")
                 final_action, _ = self.send_infer(ws, latest_obs)
+                print(f"[timing] <<< infer done  ({time.time() - t0:.2f}s)")
                 if final_action is not None:
                     final_action = np.array(final_action, dtype=np.float32)  # always copies → writeable
 
             self.call_count += 1
+            print(f"[timing] === total call {self.call_count} ({time.time() - t_call_start:.2f}s) ===")
 
         if final_action is not None:
             self.maybe_save_npy(
@@ -503,12 +560,14 @@ class MultiFrameInferenceServer:
                 data = pickle.loads(payload_bytes)
 
                 # client sends: payload = [state_buffer]
-                state_buffer = list(data)
-                print('state buffer')
-                print(type(state_buffer))
-                print(len(state_buffer))
-                for it in state_buffer:
-                    print(type(it))
+                # Unwrap the outer list if present; convert to plain list so
+                # slicing (e.g. state_buffer[-4:]) always works regardless of
+                # whether the client sends [state_buffer] or state_buffer directly.
+                if isinstance(data, (list, tuple)) and len(data) == 1 and isinstance(data[0], (list, tuple)):
+                    state_buffer = list(data[0])
+                else:
+                    state_buffer = list(data)
+                print(f"[inference] state_buffer type={type(data).__name__}, len={len(state_buffer)}")
 
                 # ── 2. Run inference ───────────────────────────────────────────
                 response = self.handle_inference(state_buffer)
@@ -524,6 +583,14 @@ class MultiFrameInferenceServer:
                     "status": "error",
                     "message": str(e),
                 }), 500
+        
+        @self.app.post("/start")
+        def start():
+            print("[Server] restarting inference session.")
+            self.call_count = 0 
+
+            return {"status": "ok"}
+
 
     # =========================
     # Main
@@ -544,7 +611,7 @@ if __name__ == "__main__":
         app_port=9002,
         ws_server_url="ws://127.0.0.1:9001",
         save_root="./received_data",
-        save_data=False,
+        save_data=True,
         prompt=DEFAULT_PROMPT,
     )
     print(f"🚀 WAN-VA Chunk Server (UR5 local) running on {server.APP_HOST}:{server.APP_PORT}")

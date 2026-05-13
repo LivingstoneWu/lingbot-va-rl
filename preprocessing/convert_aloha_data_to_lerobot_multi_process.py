@@ -13,16 +13,17 @@ from multiprocessing import Pool, cpu_count
 from functools import partial
 import time
 import tyro
-from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME
+import lerobot.datasets.lerobot_dataset as lerobot_dataset_module
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # 配置常量
 HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
-RAW_DATASET_NAMES = ["put_pen_into_pencil_case_trim"]  # 请修改为实际数据集名称, original dataset name
+RAW_DATASET_NAMES = ["press_three_buttons"]  # 请修改为实际数据集名称, original dataset name
 PUSH_TO_HUB = False
 PROCESS_BATCH_SIZE=8
-NUM_WORKERS=8
+NUM_WORKERS=4
 PREFETCH_QUEUE_SIZE=32
+IMAGE_WRITER_PROCESSES=0
 DATA_DIR = "/liujinxin/dataset/robochallenge/"
 
 class EpisodeStateFiles:
@@ -491,13 +492,13 @@ def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[
             
             # 合并状态和动作
             state = np.concatenate((
-                left_eef_state, right_eef_state,
+                # left_eef_state, right_eef_state,
                 left_joints_state, right_joints_state,
                 np.array([left_gripper_state, right_gripper_state], dtype=np.float32)
             ))
             
             action = np.concatenate((
-                left_eef_action, right_eef_action,
+                # left_eef_action, right_eef_action,
                 left_joints_action, right_joints_action,
                 np.array([left_gripper_action, right_gripper_action], dtype=np.float32)
             ))
@@ -649,13 +650,13 @@ def process_episode_with_frames(episode: EpisodeStateFiles, global_task_info: Op
             
             # 合并状态和动作
             state = np.concatenate((
-                left_eef_state, right_eef_state,
+                # left_eef_state, right_eef_state,
                 left_joints_state, right_joints_state,
                 np.array([left_gripper_state, right_gripper_state], dtype=np.float32)
             ))
             
             action = np.concatenate((
-                left_eef_action, right_eef_action,
+                # left_eef_action, right_eef_action,
                 left_joints_action, right_joints_action,
                 np.array([left_gripper_action, right_gripper_action], dtype=np.float32)
             ))
@@ -772,6 +773,7 @@ def process_episode_stream_to_dataset(
 
         frame_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
         sentinel = {"__done__": True}
+        stop_event = threading.Event()
 
         def _producer() -> None:
             try:
@@ -781,8 +783,12 @@ def process_episode_stream_to_dataset(
                     "cam_wrist_right": "observation.images.right_wrist",
                 }
                 for _ in range(valid_len):
+                    if stop_event.is_set():
+                        break
                     item: Dict[str, Any] = {}
                     for cam_key, feature_key in cam_to_feature.items():
+                        if stop_event.is_set():
+                            break
                         cap = caps[cam_key]
                         if cap is None:
                             item[feature_key] = None
@@ -793,11 +799,26 @@ def process_episode_stream_to_dataset(
                             continue
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         item[feature_key] = cv2.resize(frame_rgb, (256, 256))
-                    frame_queue.put(item)
+                    while not stop_event.is_set():
+                        try:
+                            frame_queue.put(item, timeout=0.2)
+                            break
+                        except queue.Full:
+                            continue
             except Exception as exc:
-                frame_queue.put({"__error__": str(exc)})
+                while not stop_event.is_set():
+                    try:
+                        frame_queue.put({"__error__": str(exc)}, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
             finally:
-                frame_queue.put(sentinel)
+                while not stop_event.is_set():
+                    try:
+                        frame_queue.put(sentinel, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
 
         producer = threading.Thread(target=_producer, daemon=True)
         producer.start()
@@ -835,12 +856,12 @@ def process_episode_stream_to_dataset(
                     right_gripper_action = 0.0
 
                 state = np.concatenate((
-                    left_eef_state, right_eef_state,
+                    # left_eef_state, right_eef_state,
                     left_joints_state, right_joints_state,
                     np.array([left_gripper_state, right_gripper_state], dtype=np.float32)
                 ))
                 action = np.concatenate((
-                    left_eef_action, right_eef_action,
+                    # left_eef_action, right_eef_action,
                     left_joints_action, right_joints_action,
                     np.array([left_gripper_action, right_gripper_action], dtype=np.float32)
                 ))
@@ -861,7 +882,8 @@ def process_episode_stream_to_dataset(
 
             dataset.save_episode()
         finally:
-            producer.join()
+            stop_event.set()
+            producer.join(timeout=2.0)
             for cap in caps.values():
                 if cap is not None:
                     cap.release()
@@ -873,7 +895,13 @@ def process_episode_stream_to_dataset(
         traceback.print_exc()
         return 0
 
-def main(repo_name: str, data_dir: str = DATA_DIR, include_frames: bool = True, num_episodes: Optional[int] = None):
+def main(
+    repo_name: str,
+    raw_dataset: List[str] = RAW_DATASET_NAMES,
+    data_dir: str = DATA_DIR,
+    include_frames: bool = True,
+    num_episodes: Optional[int] = None,
+):
     """
     主函数
     
@@ -883,8 +911,11 @@ def main(repo_name: str, data_dir: str = DATA_DIR, include_frames: bool = True, 
         include_frames: 是否包含视频帧（如果为False，只处理状态和动作，速度更快）
         num_episodes: 处理的episode数量，None表示全部
     """
+    # 显式设置输出根目录（os.system("export ...") 不会影响当前Python进程）
+    os.environ["HF_LEROBOT_HOME"] = str(HF_LEROBOT_HOME)
+    lerobot_dataset_module.HF_LEROBOT_HOME = HF_LEROBOT_HOME
+
     # 清理输出目录
-    os.system("export HF_LEROBOT_HOME='/liujinxin/code/lhc/lingbot-va/datasets/robochallenge'")
     output_path = HF_LEROBOT_HOME / repo_name
     if output_path.exists():
         shutil.rmtree(output_path)
@@ -897,7 +928,9 @@ def main(repo_name: str, data_dir: str = DATA_DIR, include_frames: bool = True, 
     print("=" * 60)
     print(f"开始处理数据集: {repo_name}")
     print(f"数据目录: {data_dir}")
+    print(f"原始数据集: {raw_dataset}")
     print(f"包含视频帧: {include_frames}")
+    print(f"HF_LEROBOT_HOME: {HF_LEROBOT_HOME}")
     print("=" * 60)
     
     start_time = time.time()
@@ -955,25 +988,29 @@ def main(repo_name: str, data_dir: str = DATA_DIR, include_frames: bool = True, 
             },
             "observation.state": {
                 "dtype": "float32",
-                "shape": (28,),
+                "shape": (14,),
                 "names": ["motors"],
             },
             "action": {
                 "dtype": "float32",
-                "shape": (28,),
+                "shape": (14,),
                 "names": ["motors"],
             },
         },
         use_videos=True,
         image_writer_threads=10,
-        image_writer_processes=5,
+        image_writer_processes=IMAGE_WRITER_PROCESSES,
     )
     
     # 存储所有episode
     all_episodes = []
     
+    if not raw_dataset:
+        print("ERROR: raw_dataset 为空，请通过 --raw-dataset 指定至少一个数据集名称。")
+        return
+
     # 对于每个数据集，先加载全局元数据，然后查找episode
-    for raw_dataset_name in RAW_DATASET_NAMES:
+    for raw_dataset_name in raw_dataset:
         print(f"\n处理数据集: {raw_dataset_name}")
         raw_dataset_path = os.path.join(data_dir, raw_dataset_name)
         

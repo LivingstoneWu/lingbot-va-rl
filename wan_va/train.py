@@ -152,6 +152,9 @@ class Trainer:
             shuffle=(train_sampler is None), 
             num_workers=config.load_worker,
             sampler=train_sampler,
+            pin_memory=True,          # allows non-blocking CPU→GPU transfer
+            persistent_workers=True,  # avoids worker respawn overhead at epoch boundary
+            prefetch_factor=2,
         )
 
         self.train_scheduler_latent = FlowMatchScheduler(shift=self.config.snr_shift, sigma_min=0.0, extra_one_step=True)
@@ -255,8 +258,9 @@ class Trainer:
             action_mode=True,
             noisy_cond_prob=0.0)
 
-        latent_dict['text_emb'] = batch_dict['text_emb']
-        action_dict['text_emb'] = batch_dict['text_emb']
+        latent_dict['text_emb']     = batch_dict['text_emb']
+        latent_dict['latents_mask'] = batch_dict['latents_mask']   # (B, F_max) bool
+        action_dict['text_emb']     = batch_dict['text_emb']
         action_dict['actions_mask'] = batch_dict['actions_mask']
 
         input_dict = {
@@ -293,10 +297,17 @@ class Trainer:
         # Permute to (B, F, H, W, C) and flatten to (B*F, H*W*C)
         latent_loss = latent_loss.permute(0, 2, 3, 4, 1)  # (B, C, F, H, W) -> (B, F, H, W, C)
         latent_loss = latent_loss.flatten(0, 1).flatten(1)  # (B, F, H, W, C) -> (B*F, H*W*C)
-        # Sum per frame and compute mask per frame
-        latent_loss_per_frame = latent_loss.sum(dim=1)  # (B*F,)
-        latent_mask_per_frame = torch.ones_like(latent_loss).sum(dim=1)  # (B*F,)
-        latent_loss = (latent_loss_per_frame / (latent_mask_per_frame + 1e-6)).mean()
+        # Sum per frame and compute element count per frame
+        latent_loss_per_frame = latent_loss.sum(dim=1)           # (B*F_max,)
+        latent_elems_per_frame = torch.ones_like(latent_loss).sum(dim=1)  # (B*F_max,)
+
+        # latents_mask: (B, F_max) → (B*F_max,) float; zeros out padded frames.
+        # flatten() preserves the same (B, F_max) → (B*F_max,) row-major order as
+        # latent_loss.permute(...).flatten(0,1), so frame indices align correctly.
+        lm = input_dict['latent_dict']['latents_mask'].flatten().float()  # (B*F_max,)
+        latent_loss = (
+            (latent_loss_per_frame / (latent_elems_per_frame + 1e-6)) * lm
+        ).sum() / (lm.sum() + 1e-6)
 
         # Frame-wise action loss calculation
         action_loss = F.mse_loss(action_pred.float(), input_dict['action_dict']['targets'].float().detach(), reduction='none')
@@ -307,10 +318,13 @@ class Trainer:
         action_mask = input_dict['action_dict']['actions_mask'].float().permute(0, 2, 3, 4, 1)  # (B, C, F, H, W) -> (B, F, H, W, C)
         action_loss = action_loss.flatten(0, 1).flatten(1)  # (B, F, H, W, C) -> (B*F, H*W*C)
         action_mask = action_mask.flatten(0, 1).flatten(1)  # (B, F, H, W, C) -> (B*F, H*W*C)
-        # Sum per frame and normalize by mask per frame
-        action_loss_per_frame = action_loss.sum(dim=1)  # (B*F,)
-        action_mask_per_frame = action_mask.sum(dim=1)  # (B*F,)
-        action_loss = (action_loss_per_frame / (action_mask_per_frame + 1e-6)).mean()
+        # Sum per frame, normalise by real action slots, then exclude padded frames
+        # via lm (same frame ordering as latent loss, reused from above).
+        action_loss_per_frame = action_loss.sum(dim=1)  # (B*F_max,)
+        action_mask_per_frame = action_mask.sum(dim=1)  # (B*F_max,)
+        action_loss = (
+            (action_loss_per_frame / (action_mask_per_frame + 1e-6)) * lm
+        ).sum() / (lm.sum() + 1e-6)
 
         return latent_loss / self.gradient_accumulation_steps, action_loss / self.gradient_accumulation_steps
 

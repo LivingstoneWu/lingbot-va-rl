@@ -84,8 +84,9 @@ def run_sample(server: VA_Server, sample: dict, sample_dir: Path,
     Run multi-chunk inference following the actual deployment flow:
 
       reset()
-      chunk 0 : _infer(frame_st_id=0)          ← no KV cache, zero action_cond
-      chunk k>0: _compute_kv_cache(kv_window)   ← updates server.frame_st_id
+      chunk 0 : _compute_kv_cache(frame_0, gt_state)  ← warm-up; frame_st_id → 1
+                _infer(frame_st_id=1)
+      chunk k>0: _compute_kv_cache(kv_window)          ← updates server.frame_st_id
                  _infer(frame_st_id=server.frame_st_id)
 
     _encode_obs is monkey-patched so the pre-computed dataset latents are used
@@ -133,7 +134,24 @@ def run_sample(server: VA_Server, sample: dict, sample_dir: Path,
             # indexing here is correct without any extra offset.
             f_obs = f_start + chunk_idx * frame_chunk_size
 
-            if chunk_idx > 0:
+            # ── KV cache update ───────────────────────────────────────────────
+            if chunk_idx == 0:
+                # Warm-up: feed frame f_obs + GT initial state as 1-frame KV
+                # context before inferring.  Mirrors the deployment flow where
+                # the chunk server calls send_compute_kv_cache with the current
+                # frame and robot state before the first send_infer.
+                kv_frame = latent[:, f_obs:f_obs + 1]   # (C, 1, H, W)
+                server._encode_obs = lambda _, _f=kv_frame: (
+                    _f.unsqueeze(0).to(server.device).to(server.dtype)
+                )
+                # Denormalise GT action at f_obs, step 0 → raw used-channel state
+                gt_state_norm = gt_actions[:, f_obs:f_obs + 1, 0:1, :].unsqueeze(0)
+                gt_state_denorm = server.postprocess_action(gt_state_norm)  # (1, C_used)
+                fake_obs['state'] = gt_state_denorm[0]   # (C_used,) passed to _state_to_action_tensor
+                server._compute_kv_cache(fake_obs)
+                fake_obs.pop('state', None)   # don't leak into subsequent calls
+                # server.frame_st_id is now 1
+            else:
                 # ── KV cache: kv_cache_window latent frames ending at f_obs ──
                 f_kv = max(0, f_obs - kv_cache_window)
                 kv_frames = latent[:, f_kv:f_obs]   # (C, kv_cache_window, H, W)

@@ -42,10 +42,12 @@ def load_transformer(
     transformer_path,
     torch_dtype,
     torch_device,
+    attn_mode="flex"
 ):
     model = WanTransformer3DModel.from_pretrained(
         transformer_path,
         torch_dtype=torch_dtype,
+        attn_mode=attn_mode,
     )
     return model.to(torch_device)
 

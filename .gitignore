@@ -13,3 +13,11 @@ RoboChallengeInference
 datasets_ori
 inf_out/
 received_data_request/
+maniparena-repo
+vjepa2/
+*.tgz
+debug/
+*out/
+*logs/
+*log/
+*data/

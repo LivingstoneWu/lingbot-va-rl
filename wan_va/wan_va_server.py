@@ -49,6 +49,16 @@ class VA_Server:
         self.device = torch.device(f"cuda:{job_config.local_rank}")
         self.enable_offload = getattr(job_config, 'enable_offload', True)  # offload vae & text_encoder to save vram
 
+        # Per-job accumulators: collect latent and action tensors from every
+        # _infer() call, then cat + save them when the next _reset() fires.
+        import threading as _threading
+        self._job_latent_chunks: list = []
+        self._job_action_chunks: list = []
+        self._job_chunks_lock   = _threading.Lock()
+
+        import atexit as _atexit
+        _atexit.register(self._flush_job_chunks)
+
         self.scheduler = FlowMatchScheduler(shift=self.job_config.snr_shift,
                                             sigma_min=0.0,
                                             extra_one_step=True)
@@ -84,6 +94,7 @@ class VA_Server:
                          'transformer'),
             torch_dtype=self.dtype,
             torch_device=self.device,
+            attn_mode="flashattn",
         )
         shard_fn = shard_model
         self.transformer = _configure_model(model=self.transformer,
@@ -241,135 +252,132 @@ class VA_Server:
     #     return action_model_input.unsqueeze(0).unsqueeze(-1)  # B, C, F, H, W
     
     
+    # ---- old preprocess_action (kept for reference, no longer used) ----------
+    # def preprocess_action(self, action):
+    #     """
+    #     输入:
+    #         action:
+    #             1) 原始时序动作/状态: (T, D)，例如 (1, 7), (4, 7), (8, 7)
+    #             2) 也兼容单帧: (D,) -> 自动转成 (1, D)
+    #
+    #     输出:
+    #         action_model_input: (B, C, F, H, W)
+    #             其中:
+    #             - B = 1
+    #             - C = len(inverse_used_action_channel_ids)
+    #             - F = latent_frame_num
+    #             - H = 4
+    #             - W = 1
+    #     """
+    #     if isinstance(action, torch.Tensor):
+    #         action = action.detach().cpu().numpy()
+    #     else:
+    #         action = np.asarray(action)
+    #     if action.ndim == 1:
+    #         action = action[None, :]
+    #     elif action.ndim != 2:
+    #         raise ValueError(f"preprocess_action expects action shape (T, D) or (D,), got {action.shape}")
+    #     T, D = action.shape
+    #     action_mask = np.ones_like(action, dtype=bool)
+    #     pad_len = self.job_config.action_per_frame
+    #     action = np.pad(action, pad_width=((pad_len, 0), (0, 0)), mode='constant', constant_values=0)
+    #     action_mask = np.pad(action_mask, pad_width=((pad_len, 0), (0, 0)), mode='constant', constant_values=False)
+    #     total_len = action.shape[0]
+    #     required_action_num = ((total_len + 3) // 4) * 4
+    #     if total_len < required_action_num:
+    #         extra = required_action_num - total_len
+    #         action = np.pad(action, pad_width=((0, extra), (0, 0)), mode='constant', constant_values=0)
+    #         action_mask = np.pad(action_mask, pad_width=((0, extra), (0, 0)), mode='constant', constant_values=False)
+    #     else:
+    #         action = action[:required_action_num]
+    #         action_mask = action_mask[:required_action_num]
+    #     latent_frame_num = required_action_num // 4
+    #     print("action dim before padding: ", action.shape)
+    #     print("inverse_ids max: ", max(self.job_config.inverse_used_action_channel_ids))
+    #     action_paded = np.pad(action, ((0, 0), (0, 1)), mode='constant', constant_values=0)
+    #     action_mask_padded = np.pad(action_mask, ((0, 0), (0, 1)), mode='constant', constant_values=False)
+    #     inverse_ids = np.array(self.job_config.inverse_used_action_channel_ids)
+    #     action_aligned      = action_paded[:,       inverse_ids]
+    #     action_mask_aligned = action_mask_padded[:, inverse_ids]
+    #     if self.action_norm_method == 'quantiles':
+    #         action_aligned[:, self.action_valid] = np.where(
+    #             action_mask_aligned[:, self.action_valid],
+    #             (action_aligned[:, self.action_valid] - self.q01[self.action_valid]) /
+    #             (self.q99[self.action_valid] - self.q01[self.action_valid] + 1e-6) * 2.0 - 1.0,
+    #             0.0
+    #         )
+    #         action_aligned[:, ~self.action_valid] = 0.0
+    #     else:
+    #         raise NotImplementedError
+    #     action_aligned = rearrange(action_aligned, "(f n) c -> c f n 1", f=latent_frame_num)
+    #     action_mask_aligned = rearrange(action_mask_aligned, "(f n) c -> c f n 1", f=latent_frame_num)
+    #     action_aligned = action_aligned * action_mask_aligned
+    #     action_model_input = torch.from_numpy(action_aligned).float().unsqueeze(0)
+    #     return action_model_input
+    # ---- end old preprocess_action -------------------------------------------
+
     def preprocess_action(self, action):
-        """
-        输入:
-            action:
-                1) 原始时序动作/状态: (T, D)，例如 (1, 7), (4, 7), (8, 7)
-                2) 也兼容单帧: (D,) -> 自动转成 (1, D)
+        """Encode observed robot states → model action conditioning tensor.
 
-        输出:
-            action_model_input: (B, C, F, H, W)
-                其中:
-                - B = 1
-                - C = len(inverse_used_action_channel_ids)
-                - F = latent_frame_num
-                - H = 4
-                - W = 1
-        """
+        Converts a sequence of real robot states into the format expected by
+        the transformer's action conditioning input.  No zero-padding is
+        applied; the caller is responsible for providing exactly
+        F * action_per_frame rows (where F = frame_chunk_size).
 
+        Args:
+            action: array-like of shape (T, D) or (D,).
+                T must equal frame_chunk_size * action_per_frame.
+                D is the robot state dimension in *used-channel space*
+                (same layout as what the client sends).
+
+        Returns:
+            torch.Tensor of shape (1, C_model, F, action_per_frame, 1),
+            ready to be passed as action_model_input to _prepare_latent_input.
+        """
         if isinstance(action, torch.Tensor):
             action = action.detach().cpu().numpy()
         else:
-            action = np.asarray(action)
+            action = np.asarray(action, dtype=np.float32)
 
-        # 支持 (D,) -> (1, D)
         if action.ndim == 1:
             action = action[None, :]
         elif action.ndim != 2:
-            raise ValueError(f"preprocess_action expects action shape (T, D) or (D,), got {action.shape}")
+            raise ValueError(
+                f"preprocess_action expects shape (T, D) or (D,), got {action.shape}"
+            )
 
-        # action: (T, D)
         T, D = action.shape
-
-        # ===== 1) 构造 mask =====
-        action_mask = np.ones_like(action, dtype=bool)
-
-        # ===== 2) 前面 pad 4 帧 =====
-        # 对齐训练里的:
-        # pad_len = frame_stride * 4
-        # 在 debug / inference 里先按 frame_stride = 1 处理
-        # MYEDIT: need to match the pattern in training
-        pad_len = self.job_config.action_per_frame
-
-
-        action = np.pad(
-            action,
-            pad_width=((pad_len, 0), (0, 0)),
-            mode='constant',
-            constant_values=0
-        )
-        action_mask = np.pad(
-            action_mask,
-            pad_width=((pad_len, 0), (0, 0)),
-            mode='constant',
-            constant_values=False
-        )
-
-        # ===== 3) 截断到能被 4 整除 =====
-        total_len = action.shape[0]
-        required_action_num = ((total_len + 3) // 4) * 4  # 向上补齐到 4 的倍数
-
-        if total_len < required_action_num:
-            extra = required_action_num - total_len
-            action = np.pad(
-                action,
-                pad_width=((0, extra), (0, 0)),
-                mode='constant',
-                constant_values=0
+        if T % self.action_per_frame != 0:
+            raise ValueError(
+                f"T={T} must be divisible by action_per_frame={self.action_per_frame}. "
+                f"Pass frame_chunk_size * action_per_frame rows."
             )
-            action_mask = np.pad(
-                action_mask,
-                pad_width=((0, extra), (0, 0)),
-                mode='constant',
-                constant_values=False
+        F = T // self.action_per_frame
+
+        # Pad D by 1 so that inverse_ids (which may equal len(used_ids) for
+        # padding channels) always has a valid index to land on.
+        inv_ids = np.array(self.job_config.inverse_used_action_channel_ids)
+        action_padded = np.pad(action.astype(np.float32), ((0, 0), (0, 1)))  # (T, D+1)
+        action_aligned = action_padded[:, inv_ids]                            # (T, C_model)
+
+        # Per-channel quantile normalisation.
+        if self.action_norm_method != 'quantiles':
+            raise NotImplementedError(
+                f"Unsupported action_norm_method: {self.action_norm_method!r}"
             )
-        else:
-            action = action[:required_action_num]
-            action_mask = action_mask[:required_action_num]
-
-        latent_frame_num = required_action_num // 4
-
-        # ===== 4) 通道补 1 维，和训练保持一致 =====
-        print("action dim before padding: ", action.shape)
-        print("inverse_ids max: ", max(self.job_config.inverse_used_action_channel_ids))
-        action_paded = np.pad(
-            action,
-            ((0, 0), (0, 1)),
-            mode='constant',
-            constant_values=0
+        denom = np.maximum(self.q99 - self.q01, 1e-2)
+        action_aligned[:, self.action_valid] = (
+            (action_aligned[:, self.action_valid] - self.q01[self.action_valid])
+            / (denom[self.action_valid] + 1e-6) * 2.0 - 1.0
         )
-        action_mask_padded = np.pad(
-            action_mask,
-            ((0, 0), (0, 1)),
-            mode='constant',
-            constant_values=False
-        )
+        action_aligned[:, ~self.action_valid] = 0.0
 
-        # ===== 6) 通道对齐 =====
-        inverse_ids = np.array(self.job_config.inverse_used_action_channel_ids)
-        action_aligned      = action_paded[:,       inverse_ids]
-        action_mask_aligned = action_mask_padded[:, inverse_ids]
-
-        if self.action_norm_method == 'quantiles':
-            action_aligned[:, self.action_valid] = np.where(
-                action_mask_aligned[:, self.action_valid],
-                (action_aligned[:, self.action_valid] - self.q01[self.action_valid]) /
-                (self.q99[self.action_valid] - self.q01[self.action_valid] + 1e-6) * 2.0 - 1.0,
-                0.0
-            )
-            action_aligned[:, ~self.action_valid] = 0.0
-        else:
-            raise NotImplementedError
-
-        # ===== 7) reshape 成训练时同款格式: (C, F, 4, 1) =====
+        # Reshape (T=F*N, C) → (C, F, N, 1) then add batch dim → (1, C, F, N, 1).
         action_aligned = rearrange(
-            action_aligned,
-            "(f n) c -> c f n 1",
-            f=latent_frame_num
+            action_aligned, "(f n) c -> c f n 1",
+            f=F, n=self.action_per_frame,
         )
-        action_mask_aligned = rearrange(
-            action_mask_aligned,
-            "(f n) c -> c f n 1",
-            f=latent_frame_num
-        )
-
-        action_aligned = action_aligned * action_mask_aligned
-
-        # ===== 8) 加 batch 维 -> (1, C, F, 4, 1) =====
-        action_model_input = torch.from_numpy(action_aligned).float().unsqueeze(0)
-
-        return action_model_input
+        return torch.from_numpy(action_aligned.astype(np.float32)).float().unsqueeze(0)
 
     # def postprocess_action(self, action):
     #     action = action.cpu()  # B, C, F, H, W
@@ -578,7 +586,45 @@ class VA_Server:
         video_latent = torch.cat(mu_norm.split(1, dim=0), dim=-1)
         return video_latent.to(self.device)
 
+    def _flush_job_chunks(self):
+        """Concatenate and save latents+actions from the completed job.
+
+        Called at the top of _reset() (before state is cleared) and also
+        registered with atexit so any final partial job is saved on shutdown.
+        Safe to call multiple times — snapshots and clears the lists atomically.
+        """
+        import threading as _t
+        with self._job_chunks_lock:
+            latent_chunks = list(self._job_latent_chunks)
+            action_chunks = list(self._job_action_chunks)
+            self._job_latent_chunks = []
+            self._job_action_chunks = []
+
+        if not latent_chunks:
+            return
+
+        save_dir = getattr(self, 'exp_save_root', None)
+        if save_dir is None:
+            return
+
+        def _worker(latents, actions, d):
+            try:
+                cat_latents = torch.cat(latents, dim=2)  # (1, C, T_total, H, W)
+                cat_actions = torch.cat(actions, dim=2)  # (1, C, T_total, N, 1)
+                save_async(cat_latents.cpu(), os.path.join(d, 'latents_all.pt'))
+                save_async(cat_actions.cpu(), os.path.join(d, 'actions_all.pt'))
+                print(f"[flush_job] saved latents {tuple(cat_latents.shape)}  "
+                      f"actions {tuple(cat_actions.shape)}  → {d}")
+            except Exception as e:
+                print(f"[flush_job] ERROR: {e}")
+
+        _t.Thread(target=_worker, args=(latent_chunks, action_chunks, save_dir),
+                  daemon=True).start()
+
     def _reset(self, prompt=None):
+        # Save accumulated latents/actions from the job that just ended
+        self._flush_job_chunks()
+
         logger.info('Reset.')
         self.use_cfg = (self.job_config.guidance_scale > 1) or (self.job_config.action_guidance_scale > 1)
         #### Reset all parameters
@@ -652,7 +698,15 @@ class VA_Server:
         os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
 
-    def _infer(self, obs, frame_st_id=0):
+    def _infer(self, obs, frame_st_id=0, initial_state=None):
+        """
+        Args:
+            initial_state: Current robot state in raw used-channel space,
+                shape (D_used,) or (T, D_used). Required when frame_st_id == 0.
+                Repeated action_per_frame times, normalised inline using
+                self.q01/q99/action_valid, and used as action_cond (inpainting)
+                for the first latent frame.  Shape produced: (1, C_model, 1, N, 1).
+        """
         frame_chunk_size = self.job_config.frame_chunk_size
         if frame_st_id == 0:
             init_latent = self._encode_obs(obs)
@@ -733,15 +787,38 @@ class VA_Server:
 
                 latents[:, :, 0:1] = latent_cond if frame_st_id == 0 else latents[:, :, 0:1]
 
+            # Build action_cond once before the loop (only used at frame_st_id==0).
+            if frame_st_id == 0:
+                if initial_state is None:
+                    raise ValueError(
+                        "_infer requires initial_state when frame_st_id == 0. "
+                        "Pass the current robot state in used-channel space."
+                    )
+                state = np.asarray(initial_state, dtype=np.float32)
+                if state.ndim == 1:
+                    state = state[None, :]               # (1, D_used)
+                # Repeat the current state action_per_frame times → (N, D_used)
+                state_rep = np.tile(state[:1], (self.action_per_frame, 1))
+                # Pad to D_used+1 so inverse_ids (which may equal len(used_ids) for
+                # padding channels) has a valid index to land on.
+                inv_ids = np.array(self.job_config.inverse_used_action_channel_ids)
+                state_padded  = np.pad(state_rep, ((0, 0), (0, 1)))   # (N, D_used+1)
+                state_aligned = state_padded[:, inv_ids]               # (N, C_model)
+                denom = np.maximum(self.q99 - self.q01, 1e-2)
+                state_norm = np.where(
+                    self.action_valid[None, :],
+                    (state_aligned - self.q01[None, :]) / (denom[None, :] + 1e-6) * 2.0 - 1.0,
+                    0.0,
+                )  # (N, C_model)
+                # Reshape to (1, C_model, 1, N, 1) — the expected action_cond shape
+                action_cond = torch.from_numpy(
+                    state_norm.T[None, :, None, :, None].astype(np.float32)
+                ).to(self.device, self.dtype)             # (1, C_model, 1, N, 1)
+            else:
+                action_cond = None
+
             for i, t in enumerate(tqdm(action_timesteps)):
                 last_step = i == len(action_timesteps) - 1
-                action_cond = torch.zeros(
-                    [
-                        1, self.job_config.action_dim, 1,
-                        self.action_per_frame, 1
-                    ],
-                    device=self.device,
-                    dtype=self.dtype) if frame_st_id == 0 else None
 
                 input_dict = self._prepare_latent_input(
                     None,
@@ -779,6 +856,11 @@ class VA_Server:
 
         save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
         save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
+
+        # Accumulate for whole-job concat save (flushed on next _reset / atexit)
+        with self._job_chunks_lock:
+            self._job_latent_chunks.append(latents.cpu())
+            self._job_action_chunks.append(actions.cpu())
 
         actions = self.postprocess_action(actions)
         torch.cuda.empty_cache()
@@ -847,7 +929,8 @@ class VA_Server:
             return dict()
         else:
             logger.info(f"################# Infer One Chunk #################")
-            action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
+            action, _ = self._infer(obs, frame_st_id=self.frame_st_id,
+                                    initial_state=obs.get('state', None))
             return dict(action=action)
     
     def decode_one_video(self, latents, output_type):
@@ -878,8 +961,13 @@ class VA_Server:
         init_obs = self.load_init_obs()
         pred_latent_lst = []
         pred_action_lst = []
+        # i2va demo mode: no real robot state available, use zeros for first chunk
+        zero_state = np.zeros(len(self.job_config.used_action_channel_ids), dtype=np.float32)
         for chunk_id in range(self.job_config.num_chunks_to_infer):
-            actions, latents = self._infer(init_obs, frame_st_id=(chunk_id * self.job_config.frame_chunk_size))
+            frame_st = chunk_id * self.job_config.frame_chunk_size
+            actions, latents = self._infer(
+                init_obs, frame_st_id=frame_st,
+                initial_state=zero_state if frame_st == 0 else None)
             actions = torch.from_numpy(actions)
             pred_latent_lst.append(latents)
             pred_action_lst.append(actions)

@@ -1,0 +1,218 @@
+import os
+
+os.environ['HF_LEROBOT_HOME'] = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge'
+
+import glob
+import json
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+import tyro
+
+
+HF_LEROBOT_HOME = Path(os.environ['HF_LEROBOT_HOME'])
+DATA_DIR = "/liujinxin/dataset/robochallenge/"
+
+# The raw key used in states.jsonl
+GRIPPER_KEY = "gripper_width"
+
+
+def read_jsonl(path: str) -> List[dict]:
+    data: List[dict] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                data.append(json.loads(line))
+    return data
+
+
+def get_valid_source_episodes(raw_dataset_path: str) -> List[Tuple[str, int]]:
+    """
+    Returns (states_path, n_frames) for every source episode that has enough
+    data to have been included in the converted dataset (i.e. states_len >= 2).
+    Sorted in the same order the conversion script processes them.
+    """
+    episode_dirs = sorted(glob.glob(os.path.join(raw_dataset_path, "data", "episode_*")))
+    valid: List[Tuple[str, int]] = []
+    for ep_dir in episode_dirs:
+        states_path = os.path.join(ep_dir, "states", "states.jsonl")
+        if not os.path.exists(states_path):
+            continue
+        data = read_jsonl(states_path)
+        if len(data) >= 2:
+            valid.append((states_path, len(data) - 1))
+    return valid
+
+
+def extract_gripper_actions(states_path: str) -> np.ndarray:
+    """
+    Re-reads states.jsonl and returns gripper action values aligned to converted
+    `action` rows: action[t] uses next state's gripper value.
+
+    Returns:
+        gripper_actions: (N,) float32
+    """
+    data = read_jsonl(states_path)
+    n = len(data) - 1
+    out = np.zeros((n,), dtype=np.float32)
+    for i in range(n):
+        out[i] = float(data[i + 1].get(GRIPPER_KEY, 0.0))
+    return out
+
+
+def patch_parquet(
+    parquet_path: str,
+    episode_gripper_map: Dict[int, np.ndarray],
+) -> Tuple[int, List[int]]:
+    """
+    Patches action[:, -1] in one parquet file for the given episodes.
+
+    Returns:
+        (rows_patched, skipped_episode_indices)
+    """
+    table = pq.read_table(parquet_path)
+    df = table.to_pandas()
+
+    if "action" not in df.columns:
+        raise KeyError(f"'action' column not found in {parquet_path}")
+
+    act_full = np.stack(df["action"].values).astype(np.float32)
+    ep_indices = df["episode_index"].values
+
+    rows_patched = 0
+    skipped: List[int] = []
+
+    for ep_idx, gripper_actions in episode_gripper_map.items():
+        mask = ep_indices == ep_idx
+        n_rows = int(mask.sum())
+        if n_rows == 0:
+            continue
+        if n_rows != len(gripper_actions):
+            print(
+                f"  ⚠ episode {ep_idx}: converted={n_rows} frames, "
+                f"source={len(gripper_actions)} frames — frame count mismatch, skipping"
+            )
+            skipped.append(ep_idx)
+            continue
+
+        act_full[mask, -1] = gripper_actions
+        rows_patched += n_rows
+
+    df["action"] = list(act_full)
+    patched_table = pa.Table.from_pandas(df, schema=table.schema, preserve_index=False)
+    pq.write_table(patched_table, parquet_path)
+    return rows_patched, skipped
+
+
+def main(
+    repo_name: str,
+    raw_dataset_name: str,
+    data_dir: str = DATA_DIR,
+    dry_run: bool = False,
+):
+    """
+    Patches only gripper action (last action dimension) in a converted LeRobot dataset.
+
+    Mapping logic follows patch_eef_states.py:
+    - source episodes from sorted raw `episode_*`
+    - converted episodes from sorted `episode_index`
+    - strict frame-count verification before writing
+    """
+    dataset_path = HF_LEROBOT_HOME / repo_name
+    raw_dataset_path = os.path.join(data_dir, raw_dataset_name)
+
+    print(f"Converted dataset : {dataset_path}")
+    print(f"Raw dataset       : {raw_dataset_path}")
+    print(f"Patch target      : action[:, -1] from '{GRIPPER_KEY}'")
+    print(f"Dry run           : {dry_run}")
+    print()
+
+    # 1) Source episodes
+    source_episodes = get_valid_source_episodes(raw_dataset_path)
+    print(f"Valid source episodes : {len(source_episodes)}")
+
+    # 2) Parquet files
+    data_dir_path = dataset_path / "data/chunk-000"
+    parquet_files = sorted(data_dir_path.glob("train-*.parquet"))
+    if not parquet_files:
+        parquet_files = sorted(data_dir_path.glob("*.parquet"))
+    if not parquet_files:
+        print("ERROR: no parquet files found under", data_dir_path)
+        return
+    print(f"Parquet files        : {len(parquet_files)}")
+
+    # 3) Converted episode frame counts
+    meta_frames = pd.concat(
+        [pd.read_parquet(f, columns=["episode_index", "frame_index"]) for f in parquet_files]
+    )
+    episode_frame_counts: Dict[int, int] = meta_frames.groupby("episode_index").size().to_dict()
+    sorted_ep_indices = sorted(episode_frame_counts.keys())
+    n_converted = len(sorted_ep_indices)
+    print(f"Converted episodes   : {n_converted}")
+    print()
+
+    # 4) Verify episode counts
+    if len(source_episodes) != n_converted:
+        print(
+            f"ERROR: {len(source_episodes)} valid source episodes but "
+            f"{n_converted} converted episodes — counts don't match.\n"
+            "Cannot safely reconstruct the mapping; aborting."
+        )
+        return
+
+    # 5) Build episode_index -> gripper_actions map
+    print("Verifying frame counts and building episode map...")
+    episode_gripper_map: Dict[int, np.ndarray] = {}
+    abort = False
+
+    for ep_idx, (source_path, source_n_frames) in zip(sorted_ep_indices, source_episodes):
+        converted_n_frames = episode_frame_counts[ep_idx]
+        ep_dir_name = Path(source_path).parts[-3]  # e.g. episode_0042
+
+        if source_n_frames != converted_n_frames:
+            print(
+                f"  ✗ episode_index {ep_idx} ↔ {ep_dir_name}: "
+                f"source={source_n_frames} frames, converted={converted_n_frames} frames — MISMATCH"
+            )
+            abort = True
+        else:
+            print(f"  ✓ episode_index {ep_idx} ↔ {ep_dir_name}: {source_n_frames} frames")
+            episode_gripper_map[ep_idx] = extract_gripper_actions(source_path)
+
+    if abort:
+        print("\nFrame count mismatches detected — aborting to avoid writing incorrect data.")
+        return
+
+    if dry_run:
+        print(f"\nDry run complete — {len(episode_gripper_map)} episodes verified, nothing written.")
+        return
+
+    # 6) Patch parquet files
+    print(f"\nPatching {len(parquet_files)} parquet file(s)...")
+    total_rows = 0
+    all_skipped: List[int] = []
+
+    for pf in parquet_files:
+        ep_indices_in_file = set(pd.read_parquet(pf, columns=["episode_index"])["episode_index"].unique())
+        relevant = {k: v for k, v in episode_gripper_map.items() if k in ep_indices_in_file}
+        if not relevant:
+            continue
+
+        print(f"  {pf.name} — {len(relevant)} episode(s)...", end=" ", flush=True)
+        rows, skipped = patch_parquet(str(pf), relevant)
+        print(f"{rows} rows patched" + (f", {len(skipped)} skipped" if skipped else ""))
+        total_rows += rows
+        all_skipped.extend(skipped)
+
+    print(f"\nDone. {total_rows} rows patched across {len(parquet_files)} file(s).")
+    if all_skipped:
+        print(f"Skipped episode indices (frame count mismatch): {all_skipped}")
+
+
+if __name__ == "__main__":
+    tyro.cli(main)

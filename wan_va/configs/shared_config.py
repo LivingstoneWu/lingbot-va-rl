@@ -12,5 +12,5 @@ va_shared_cfg.save_root = './checkpoints'
 
 va_shared_cfg.patch_size = (1, 2, 2)
 
-va_shared_cfg.enable_offload = True
+va_shared_cfg.enable_offload = False
 va_shared_cfg.log_freq = 10  # log metrics to log.jsonl every N optimizer steps

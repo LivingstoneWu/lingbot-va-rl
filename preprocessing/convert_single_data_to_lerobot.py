@@ -28,12 +28,88 @@ PUSH_TO_HUB = False
 # NOTE: keep NUM_WORKERS small (4–8). Each worker loads full video frames into
 # memory and returns large numpy arrays through the IPC pipe. 80 workers ×
 # ~300MB/episode = ~24GB peak — this causes silent OOM kills on the cluster.
-NUM_WORKERS = 2
-PREFETCH_QUEUE_SIZE = 32
+NUM_WORKERS = 8
+PREFETCH_QUEUE_SIZE = 64
+IMAGE_WRITER_PROCESSES = 0
 DATA_DIR = "/liujinxin/dataset/robochallenge/"
 
 # 摄像头CSV文件默认路径（相对于脚本所在目录）
 DEFAULT_CAMERAS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cameras.csv")
+
+
+def get_gripper_key_for_robot_type(robot_type: str) -> str:
+    """
+    Determine gripper field key from robot type:
+      - UR5*            -> gripper
+      - ARX5* / Franka* -> gripper_width
+    """
+    rt = robot_type.strip().lower()
+    if rt.startswith("ur5"):
+        return "gripper"
+    if rt.startswith("arx5") or rt.startswith("franka"):
+        return "gripper_width"
+    # Keep current behavior as fallback.
+    return "gripper"
+
+
+def get_joint_dim_for_robot_type(robot_type: str) -> int:
+    rt = robot_type.strip().lower()
+    if rt.startswith("franka"):
+        return 7
+    return 6
+
+
+def _read_joint_positions(step: Dict[str, Any], joint_dim: int) -> np.ndarray:
+    arr = np.asarray(step.get("joint_positions", np.zeros(joint_dim, dtype=np.float32)), dtype=np.float32).reshape(-1)
+    if arr.shape[0] != joint_dim:
+        raise ValueError(
+            f"joint_positions dim mismatch: expected {joint_dim}, got {arr.shape[0]} value={arr!r}"
+        )
+    return arr
+
+
+def _read_gripper_value(step: Dict[str, Any], gripper_key: str) -> float:
+    """
+    Read gripper value robustly:
+      - accepts scalar numeric
+      - accepts single-element list/tuple/ndarray
+    Raises on malformed/missing values instead of silently defaulting.
+    """
+    key_used = gripper_key
+    if key_used not in step:
+        fallback = "gripper_width" if gripper_key == "gripper" else "gripper"
+        if fallback in step:
+            key_used = fallback
+        else:
+            raise KeyError(
+                f"Missing gripper key '{gripper_key}' (and fallback '{fallback}') in step keys: {list(step.keys())}"
+            )
+
+    v = step[key_used]
+    if v is None:
+        raise ValueError(f"Gripper value at key '{key_used}' is None")
+
+    # Accept one-element containers, but reject ambiguous multi-element values.
+    if isinstance(v, (list, tuple)):
+        if len(v) != 1:
+            raise ValueError(
+                f"Gripper value at key '{key_used}' must be scalar or single-element list/tuple, got length={len(v)}"
+            )
+        v = v[0]
+    elif isinstance(v, np.ndarray):
+        flat = v.reshape(-1)
+        if flat.size != 1:
+            raise ValueError(
+                f"Gripper value at key '{key_used}' must be scalar or single-element array, got shape={v.shape}"
+            )
+        v = flat[0]
+
+    try:
+        return float(v)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"Gripper value at key '{key_used}' is not numeric-convertible: {v!r}"
+        ) from e
 
 
 def get_single_arm_robot_types(cameras_csv_path: str) -> List[str]:
@@ -426,7 +502,9 @@ def print_episode_info(episodes: List[EpisodeStateFiles], title: str = "Episode�
 
 
 def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[Dict] = None,
-                         global_video_prompt: Optional[str] = None) -> Tuple[List[Dict[str, Any]], str, str]:
+                         global_video_prompt: Optional[str] = None,
+                         gripper_key: str = "gripper",
+                         joint_dim: int = 6) -> Tuple[List[Dict[str, Any]], str, str]:
     """
     快速处理单个episode（单臂），优化速度
 
@@ -477,10 +555,10 @@ def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[
         episode_data = []
 
         for index in range(valid_len):
-            joints_state = np.array(states_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
-            joints_action = np.array(states_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
-            gripper_state = float(states_data[index].get('gripper', 0.0))
-            gripper_action = float(states_data[index + 1].get('gripper', 0.0))
+            joints_state = _read_joint_positions(states_data[index], joint_dim)
+            joints_action = _read_joint_positions(states_data[index + 1], joint_dim)
+            gripper_state = _read_gripper_value(states_data[index], gripper_key)
+            gripper_action = _read_gripper_value(states_data[index + 1], gripper_key)
 
             # state: joints(6) + gripper(1) = 7
             state = np.concatenate((
@@ -509,7 +587,9 @@ def process_episode_fast(episode: EpisodeStateFiles, global_task_info: Optional[
 
 
 def process_episode_with_frames(episode: EpisodeStateFiles, global_task_info: Optional[Dict] = None,
-                                global_video_prompt: Optional[str] = None) -> Tuple[List[Dict[str, Any]], str, str]:
+                                global_video_prompt: Optional[str] = None,
+                                gripper_key: str = "gripper",
+                                joint_dim: int = 6) -> Tuple[List[Dict[str, Any]], str, str]:
     """
     处理单个episode（单臂），包含视频帧（较慢）
 
@@ -572,10 +652,10 @@ def process_episode_with_frames(episode: EpisodeStateFiles, global_task_info: Op
         episode_data = []
 
         for index in range(valid_len):
-            joints_state = np.array(states_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
-            joints_action = np.array(states_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
-            gripper_state = float(states_data[index].get('gripper', 0.0))
-            gripper_action = float(states_data[index + 1].get('gripper', 0.0))
+            joints_state = _read_joint_positions(states_data[index], joint_dim)
+            joints_action = _read_joint_positions(states_data[index + 1], joint_dim)
+            gripper_state = _read_gripper_value(states_data[index], gripper_key)
+            gripper_action = _read_gripper_value(states_data[index + 1], gripper_key)
 
             # state: joints(6) + gripper(1) = 7
             state = np.concatenate((
@@ -633,6 +713,8 @@ def process_episode_stream_to_dataset(
     camera_config: Dict[str, Optional[str]],
     global_task_info: Optional[Dict] = None,
     global_video_prompt: Optional[str] = None,
+    gripper_key: str = "gripper",
+    joint_dim: int = 6,
 ) -> int:
     """
     Stream one episode directly into LeRobotDataset without building large frame
@@ -658,14 +740,19 @@ def process_episode_stream_to_dataset(
 
     frame_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
     sentinel = {"__done__": True}
+    stop_event = threading.Event()
 
     def _producer() -> None:
         try:
             for _ in range(valid_len):
+                if stop_event.is_set():
+                    break
                 out: Dict[str, Any] = {}
                 for out_key, cap_key in [('observation.images.top', 'top'),
                                          ('observation.images.wrist', 'wrist'),
                                          ('observation.images.scene', 'scene')]:
+                    if stop_event.is_set():
+                        break
                     if out_key == 'observation.images.scene' and not camera_config.get('scene'):
                         continue
                     cap = caps.get(cap_key)
@@ -678,21 +765,36 @@ def process_episode_stream_to_dataset(
                     else:
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         out[out_key] = cv2.resize(frame_rgb, (256, 256))
-                frame_queue.put(out)
+                while not stop_event.is_set():
+                    try:
+                        frame_queue.put(out, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
         except Exception as exc:
-            frame_queue.put({"__error__": str(exc)})
+            while not stop_event.is_set():
+                try:
+                    frame_queue.put({"__error__": str(exc)}, timeout=0.2)
+                    break
+                except queue.Full:
+                    continue
         finally:
-            frame_queue.put(sentinel)
+            while not stop_event.is_set():
+                try:
+                    frame_queue.put(sentinel, timeout=0.2)
+                    break
+                except queue.Full:
+                    continue
 
     written = 0
     producer = threading.Thread(target=_producer, daemon=True)
     producer.start()
     try:
         for index in range(valid_len):
-            joints_state = np.array(states_data[index].get('joint_positions', np.zeros(6)), dtype=np.float32)
-            joints_action = np.array(states_data[index + 1].get('joint_positions', np.zeros(6)), dtype=np.float32)
-            gripper_state = float(states_data[index].get('gripper', 0.0))
-            gripper_action = float(states_data[index + 1].get('gripper', 0.0))
+            joints_state = _read_joint_positions(states_data[index], joint_dim)
+            joints_action = _read_joint_positions(states_data[index + 1], joint_dim)
+            gripper_state = _read_gripper_value(states_data[index], gripper_key)
+            gripper_action = _read_gripper_value(states_data[index + 1], gripper_key)
 
             state = np.concatenate((joints_state, np.array([gripper_state], dtype=np.float32)))
             action = np.concatenate((joints_action, np.array([gripper_action], dtype=np.float32)))
@@ -712,7 +814,8 @@ def process_episode_stream_to_dataset(
             dataset.add_frame(frame_dict, task=tasks)
             written += 1
     finally:
-        producer.join()
+        stop_event.set()
+        producer.join(timeout=2.0)
         for cap in caps.values():
             cap.release()
 
@@ -723,7 +826,9 @@ def process_episode_stream_to_dataset(
 
 def process_episode_batch(episodes: List[EpisodeStateFiles], include_frames: bool = False,
                           global_task_info: Optional[Dict] = None,
-                          global_video_prompt: Optional[str] = None) -> List[Tuple[List[Dict[str, Any]], str, str]]:
+                          global_video_prompt: Optional[str] = None,
+                          gripper_key: str = "gripper",
+                          joint_dim: int = 6) -> List[Tuple[List[Dict[str, Any]], str, str]]:
     """
     批量处理episode
 
@@ -739,11 +844,15 @@ def process_episode_batch(episodes: List[EpisodeStateFiles], include_frames: boo
     if include_frames:
         process_func = partial(process_episode_with_frames,
                                global_task_info=global_task_info,
-                               global_video_prompt=global_video_prompt)
+                               global_video_prompt=global_video_prompt,
+                               gripper_key=gripper_key,
+                               joint_dim=joint_dim)
     else:
         process_func = partial(process_episode_fast,
                                global_task_info=global_task_info,
-                               global_video_prompt=global_video_prompt)
+                               global_video_prompt=global_video_prompt,
+                               gripper_key=gripper_key,
+                               joint_dim=joint_dim)
 
     return [process_func(ep) for ep in episodes]
 
@@ -825,13 +934,13 @@ def reencode_dataset_videos(dataset_path: Path, num_workers: int = 8):
 
 # Module-level wrappers required for pool.imap (closures/lambdas can't be pickled)
 def _process_fast_wrapper(args):
-    episode, task_info, video_prompt = args
-    return process_episode_fast(episode, task_info, video_prompt)
+    episode, task_info, video_prompt, gripper_key, joint_dim = args
+    return process_episode_fast(episode, task_info, video_prompt, gripper_key=gripper_key, joint_dim=joint_dim)
 
 
 def _process_frames_wrapper(args):
-    episode, task_info, video_prompt = args
-    return process_episode_with_frames(episode, task_info, video_prompt)
+    episode, task_info, video_prompt, gripper_key, joint_dim = args
+    return process_episode_with_frames(episode, task_info, video_prompt, gripper_key=gripper_key, joint_dim=joint_dim)
 
 
 def main(repo_name: str,
@@ -879,8 +988,12 @@ def main(repo_name: str,
 
     # 加载摄像头配置
     camera_config = load_camera_config(cameras_csv, robot_type)
+    gripper_key = get_gripper_key_for_robot_type(robot_type)
+    joint_dim = get_joint_dim_for_robot_type(robot_type)
     print(f"摄像头配置 ({robot_type}): main={camera_config['main']}, "
           f"wrist={camera_config['wrist']}, scene={camera_config['scene']}")
+    print(f"夹爪键 ({robot_type}): {gripper_key}")
+    print(f"关节维度 ({robot_type}): {joint_dim}")
 
     # 清理输出目录
     os.system("export HF_LEROBOT_HOME='/liujinxin/code/lhc/lingbot-va/datasets/robochallenge'")
@@ -924,12 +1037,12 @@ def main(repo_name: str,
         "observation.images.wrist": video_feature,
         "observation.state": {
             "dtype": "float32",
-            "shape": (7,),
+            "shape": (joint_dim + 1,),
             "names": ["motors"],
         },
         "action": {
             "dtype": "float32",
-            "shape": (7,),
+            "shape": (joint_dim + 1,),
             "names": ["motors"],
         },
     }
@@ -946,7 +1059,7 @@ def main(repo_name: str,
         features=features,
         use_videos=True,
         image_writer_threads=10,
-        image_writer_processes=5,
+        image_writer_processes=IMAGE_WRITER_PROCESSES,
     )
 
     # 存储所有episode
@@ -1005,6 +1118,7 @@ def main(repo_name: str,
     if include_frames:
         print("\n使用完整模式（包含视频帧）...")
         print("启用流式写入（单进程）以降低内存占用并避免多进程大数组拷贝。")
+        num_processes = min(cpu_count(), NUM_WORKERS)
         for i, episode in enumerate(shuffled_episodes):
             metadata = main.global_metadata.get(episode.dataset_name, {'task_info': None, 'video_prompt': None})
             written = process_episode_stream_to_dataset(
@@ -1013,6 +1127,8 @@ def main(repo_name: str,
                 camera_config=camera_config,
                 global_task_info=metadata['task_info'],
                 global_video_prompt=metadata['video_prompt'],
+                gripper_key=gripper_key,
+                joint_dim=joint_dim,
             )
             if written == 0:
                 print(f"  [{i+1}/{len(shuffled_episodes)}] 跳过空的episode {episode.episode_num}")
@@ -1029,7 +1145,7 @@ def main(repo_name: str,
         for episode in shuffled_episodes:
             dataset_name = episode.dataset_name
             metadata = main.global_metadata.get(dataset_name, {'task_info': None, 'video_prompt': None})
-            process_args.append((episode, metadata['task_info'], metadata['video_prompt']))
+            process_args.append((episode, metadata['task_info'], metadata['video_prompt'], gripper_key, joint_dim))
 
         # Use imap (chunksize=1) instead of starmap so each episode's result is
         # consumed and freed immediately after writing, rather than accumulating

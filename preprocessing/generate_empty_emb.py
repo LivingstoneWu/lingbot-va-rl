@@ -1,5 +1,5 @@
 import torch, glob, os
-dataset_root = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/ur5e/stack_color_blocks_action_corrected"
+dataset_root = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/maniparena/multi_datasets/final/arrange_cup_inverted_triangle"
 pths = glob.glob(os.path.join(dataset_root, "latents", "chunk-*", "observation.images.*", "episode_*.pth"))
 assert pths, "No latent pth found"
 sample = torch.load(pths[0], weights_only=False)

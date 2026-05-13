@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from wan_va.configs import VA_CONFIGS
 
 # DATASET_DIR = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/"
-DATASET_DIR = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/ur5e/"
+DATASET_DIR = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/"
 
 def parse_channel_ids(value: str) -> List[int]:
     # Accept formats like: "0,1,2" or "0 1 2"
@@ -50,7 +50,9 @@ def resolve_inverse_ids_from_config(config_name: str):
             f"Config '{config_name}' mismatch: len(inverse_used_action_channel_ids)={len(inverse_ids)} "
             f"!= action_dim={action_dim}"
         )
-    return action_dim, inverse_ids
+    slicing_ids = list(cfg.action_slicing_ids) if hasattr(cfg, "action_slicing_ids") else None
+    pad_to_dim  = int(cfg.action_pad_to_dim)   if hasattr(cfg, "action_pad_to_dim")   else None
+    return action_dim, inverse_ids, slicing_ids, pad_to_dim
 
 
 def to_2d_float_array(values: np.ndarray) -> np.ndarray:
@@ -64,7 +66,7 @@ def to_2d_float_array(values: np.ndarray) -> np.ndarray:
         data = np.asarray(values)
     else:
         raise TypeError(f"Unsupported action element type: {type(first)}")
-    return data.reshape(-1, data.shape[-1]).astype(np.float32)
+    return data.reshape(len(values), -1).astype(np.float32)
 
 
 def align_actions_like_training(
@@ -91,8 +93,10 @@ def compute_q01_q99_parquet(
     sample_ratio: float = 1.0,
     seed: int = 42,
     inverse_ids: Optional[List[int]] = None,
+    slicing_ids: Optional[List[int]] = None,
+    pad_to_dim: Optional[int] = None,
 ):
-    parquet_pattern = os.path.join(dataset_root, "data", "**", "episode_*.parquet")
+    parquet_pattern = os.path.join(dataset_root, "**", "data", "**", "episode_*.parquet")
     print("finding files under ", parquet_pattern)
     files = sorted(glob.glob(parquet_pattern, recursive=True))
     if not files:
@@ -114,6 +118,19 @@ def compute_q01_q99_parquet(
             n = max(1, int(len(data) * sample_ratio))
             idx = rng.choice(len(data), n, replace=False)
             data = data[idx]
+
+        # Pad to common width before slicing so datasets that lack certain dims
+        # (e.g. mobile chassis dims) are zero-filled in those slots, matching the
+        # training-time behaviour in _action_post_process.
+        if pad_to_dim is not None and data.shape[1] < pad_to_dim:
+            pad_width = pad_to_dim - data.shape[1]
+            data = np.pad(data, ((0, 0), (0, pad_width)), mode='constant', constant_values=0)
+
+        if slicing_ids is not None:
+            if data.shape[1] < max(slicing_ids) + 1:
+                print(f"WARNING: skipping {fpath} — action dim {data.shape[1]} < required {max(slicing_ids) + 1}")
+                continue
+            data = data[:, slicing_ids]   # (T, D_hf) → (T, n_used)
 
         if inverse_ids is not None:
             data = align_actions_like_training(
@@ -183,6 +200,22 @@ def main():
         help="Manual mode only: target action_dim for building inverse ids from --used-action-channel-ids.",
     )
     parser.add_argument(
+        "--action-slicing-ids",
+        type=str,
+        default=None,
+        help="Manual mode only: comma/space separated column indices to select from the raw HF action "
+             "before inverse mapping (mirrors config.action_slicing_ids). Read from config automatically "
+             "when --config-name is set.",
+    )
+    parser.add_argument(
+        "--action-pad-to-dim",
+        type=int,
+        default=None,
+        help="Manual mode only: pad HF action to this width before slicing so that datasets with fewer "
+             "dims (e.g. non-mobile tasks) share the same slicing config. Read from config automatically "
+             "when --config-name is set.",
+    )
+    parser.add_argument(
         "--precision",
         type=int,
         default=8,
@@ -194,16 +227,22 @@ def main():
         raise ValueError(f"sample_ratio must be in (0, 1], got {args.sample_ratio}")
 
     inverse_ids = None
+    slicing_ids = None
+    pad_to_dim  = None
     effective_action_dim = None
 
     if args.config_name is not None:
-        effective_action_dim, inverse_ids = resolve_inverse_ids_from_config(args.config_name)
+        effective_action_dim, inverse_ids, slicing_ids, pad_to_dim = resolve_inverse_ids_from_config(args.config_name)
     elif args.used_action_channel_ids is not None:
         used_ids = parse_channel_ids(args.used_action_channel_ids)
         if args.action_dim is None:
             raise ValueError("--action-dim is required when --used-action-channel-ids is provided")
         effective_action_dim = int(args.action_dim)
         inverse_ids = build_inverse_ids(effective_action_dim, used_ids)
+        if args.action_slicing_ids is not None:
+            slicing_ids = parse_channel_ids(args.action_slicing_ids)
+        if args.action_pad_to_dim is not None:
+            pad_to_dim = args.action_pad_to_dim
 
     q01, q99, shape = compute_q01_q99_parquet(
         dataset_root=DATASET_DIR+args.repo_name,
@@ -211,6 +250,8 @@ def main():
         sample_ratio=args.sample_ratio,
         seed=args.seed,
         inverse_ids=inverse_ids,
+        slicing_ids=slicing_ids,
+        pad_to_dim=pad_to_dim,
     )
 
     print(f"Collected samples shape: {shape}")

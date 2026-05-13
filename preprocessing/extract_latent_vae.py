@@ -1,3 +1,32 @@
+"""
+extract_latent_vae.py — VAE latent extraction with randomised chunk offsets
+============================================================================
+
+Chunk sampling strategy
+-----------------------
+Fixed-length chunking without any offset causes every episode to tile at the
+same phase boundaries (e.g. chunk 0 always covers the approach phase, chunk 1
+always covers the manipulation phase, etc.).  At inference time the model sees
+each new chunk with no prior KV-cache context from the matching task phase,
+creating a train/test distribution mismatch at every chunk boundary.
+
+To break this phase alignment we use the following scheme per episode:
+
+  Chunk 0 (fixed):   [0, cs)
+  Offset tiling:     [r, r+cs),  [r+cs, r+2cs),  [r+2cs, r+3cs),  ...
+
+where  cs = chunk_size  and  r ~ randint(1, cs)  is sampled once per episode.
+
+Chunk 0 guarantees the model always trains on the task start from frame 0.
+The offset tiling then covers the rest of the episode with randomised
+boundaries: the only overlap with chunk 0 is the small region [r, cs), which
+is at most cs-1 frames.  Total chunk count per episode is roughly the same as
+the original fixed tiling — there is no significant data duplication.
+
+The offset r is in *sampled-frame* units (after FPS downsampling) so that the
+(n-1) % 4 == 0 VAE constraint is automatically satisfied for every chunk.
+"""
+
 import argparse
 import os
 import sys
@@ -31,8 +60,9 @@ class WanVAEEncoder:
         self.vae_stride = (4, 8, 8)  # VAE的时空压缩倍数
         
         # 加载VAE的均值和标准差
-        self.latents_mean = torch.tensor(self.vae.config.latents_mean)
-        self.latents_std = torch.tensor(self.vae.config.latents_std)
+        self.latents_mean = torch.tensor(self.vae.config.latents_mean, device=device, dtype=torch.float32).view(1, -1, 1, 1, 1)
+        # Keep inverse-std directly to avoid repeated reciprocal.
+        self.latents_inv_std = (1.0 / torch.tensor(self.vae.config.latents_std, device=device, dtype=torch.float32)).view(1, -1, 1, 1, 1)
 
         # 初始化video_processor用于后处理
         from diffusers.video_processor import VideoProcessor
@@ -48,8 +78,8 @@ class WanVAEEncoder:
         device = latents.device
         
         # 调整均值和标准差的形状并移动到正确的device
-        latents_mean = latents_mean.view(1, -1, 1, 1, 1).to(device=device)
-        latents_std = latents_std.view(1, -1, 1, 1, 1).to(device=device)
+        latents_mean = latents_mean.to(device=device)
+        latents_std = latents_std.to(device=device)
         
         # 归一化
         latents = ((latents.float() - latents_mean) * latents_std).to(latents.dtype)
@@ -65,9 +95,11 @@ class WanVAEEncoder:
         Returns:
             latent: [C_lat, F_lat, H_lat, W_lat] 归一化后的latent
         """
-        with torch.no_grad():
+        with torch.inference_mode():
             # 添加batch维度 [1, C, F, H, W]
-            video = video_tensor.unsqueeze(0).to(self.device)
+            if self.device.type == "cuda":
+                video_tensor = video_tensor.pin_memory()
+            video = video_tensor.unsqueeze(0).to(self.device, non_blocking=(self.device.type == "cuda"))
             
             # VAE编码
             if hasattr(self.vae, 'encode'):
@@ -95,9 +127,7 @@ class WanVAEEncoder:
                 raise TypeError(f"Expected mu to be torch.Tensor, got {type(mu)}")
             
             # 对latent进行归一化
-            latents_mean = self.latents_mean.to(mu.device)
-            latents_std = self.latents_std.to(mu.device)
-            mu_norm = self.normalize_latents(mu, latents_mean, 1.0 / latents_std)
+            mu_norm = self.normalize_latents(mu, self.latents_mean, self.latents_inv_std)
             
             # 去除batch维度
             latent = mu_norm.squeeze(0)
@@ -131,8 +161,11 @@ class WanVAEEncoder:
         if len(video_tensors) == 1:
             return [self.encode_video(video_tensors[0])]
 
-        with torch.no_grad():
-            videos = torch.stack(video_tensors, dim=0).to(self.device)  # [B, 3, F, H, W]
+        with torch.inference_mode():
+            videos = torch.stack(video_tensors, dim=0)
+            if self.device.type == "cuda":
+                videos = videos.pin_memory()
+            videos = videos.to(self.device, non_blocking=(self.device.type == "cuda"))  # [B, 3, F, H, W]
 
             if hasattr(self.vae, 'encode'):
                 enc_out = self.vae.encode(videos)
@@ -151,9 +184,7 @@ class WanVAEEncoder:
             if not isinstance(mu, torch.Tensor):
                 raise TypeError(f"Expected mu to be torch.Tensor, got {type(mu)}")
 
-            latents_mean = self.latents_mean.to(mu.device)
-            latents_std = self.latents_std.to(mu.device)
-            mu_norm = self.normalize_latents(mu, latents_mean, 1.0 / latents_std)  # [B, C, F, H, W]
+            mu_norm = self.normalize_latents(mu, self.latents_mean, self.latents_inv_std)  # [B, C, F, H, W]
 
             B, C, F_lat, H_lat, W_lat = mu_norm.shape
             results = []
@@ -185,7 +216,7 @@ class VideoProcessor:
             video_path: 视频文件路径
             
         Returns:
-            frames: list of PIL Images (所有采样帧)
+            frames: list of RGB np.ndarray (H, W, 3), uint8
             frame_ids: list of frame indices
             metadata: dict with fps, num_frames, etc.
         """
@@ -224,21 +255,22 @@ class VideoProcessor:
         # 均匀采样
         indices = np.linspace(0, total_frames - 1, adjusted_frame_count, dtype=int)
         
-        for idx in indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        # 顺序解码比逐帧 cap.set 随机seek 更快、更稳定。
+        wanted = indices.tolist()
+        want_ptr = 0
+        cur_idx = 0
+        wanted_len = len(wanted)
+        while want_ptr < wanted_len:
             ret, frame = cap.read()
             if not ret:
                 break
-            
-            # BGR to RGB
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # 调整大小
-            frame_pil = Image.fromarray(frame)
-            frame_pil = frame_pil.resize((self.target_width, self.target_height), Image.BICUBIC)
-            
-            all_frames.append(frame_pil)
-            all_frame_ids.append(int(idx))
+            if cur_idx == wanted[want_ptr]:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame = cv2.resize(frame, (self.target_width, self.target_height), interpolation=cv2.INTER_CUBIC)
+                all_frames.append(frame)
+                all_frame_ids.append(int(cur_idx))
+                want_ptr += 1
+            cur_idx += 1
         
         cap.release()
         
@@ -255,61 +287,88 @@ class VideoProcessor:
     
     def split_into_chunks(self, frames, frame_ids):
         """
-        将帧序列分成多个chunk，每个chunk包含self.chunk_size帧
-        
+        Split a sampled frame sequence into chunks using the two-series tiling
+        scheme described in the module docstring.
+
+        Always extracts chunk 0 as [0, chunk_size).  If the episode is longer
+        than one chunk, samples r ~ randint(1, chunk_size) and tiles the rest of
+        the episode starting at r: [r, r+cs), [r+cs, r+2cs), ...  The only
+        overlap with chunk 0 is [r, cs) — at most cs-1 frames.  See the module
+        docstring for the full motivation.
+
         Args:
-            frames: list of PIL Images
-            frame_ids: list of frame indices
-        
+            frames: list of PIL Images (sampled frames for one episode)
+            frame_ids: list of original video frame indices
+
         Returns:
             chunks: list of (chunk_frames, chunk_frame_ids, start_idx, end_idx)
         """
         chunks = []
         total_frames = len(frames)
-        
-        for start_idx in range(0, total_frames, self.chunk_size):
+
+        def try_add_chunk(start_idx):
+            if start_idx >= total_frames:
+                return
             end_idx = min(start_idx + self.chunk_size, total_frames)
             chunk_frames = frames[start_idx:end_idx]
             chunk_frame_ids = frame_ids[start_idx:end_idx]
-            
-            # 检查每个chunk的帧数是否满足约束 (n-1) % 4 == 0
+
+            # Enforce (n-1) % 4 == 0 required by the VAE temporal compression.
             chunk_len = len(chunk_frames)
             if (chunk_len - 1) % 4 != 0:
                 adjusted_len = ((chunk_len - 1) // 4) * 4 + 1
                 chunk_frames = chunk_frames[:adjusted_len]
                 chunk_frame_ids = chunk_frame_ids[:adjusted_len]
-                logger.info(f"  Adjusted chunk from {chunk_len} to {adjusted_len} frames to satisfy (n-1)%4==0")
+                logger.info(
+                    f"  Adjusted chunk from {chunk_len} to {adjusted_len} "
+                    f"frames to satisfy (n-1)%4==0"
+                )
 
-            # 丢弃过小的chunk（调整后小于5帧）：
-            # chunk_len=2,3,4 均被调整为1帧，导致frame_ids只有1个元素，
-            # 训练时 latent_frame_ids[1] 会报 IndexError。
-            # 最小有效大小为5帧（时序stride=4下可产生2个latent帧）。
+            # Drop chunks that are too small after adjustment.  chunk_len 2-4
+            # all collapse to 1 frame, which causes IndexError on
+            # latent_frame_ids[1] during training.  Minimum useful size is 5
+            # frames (produces 2 latent frames at temporal stride 4).
             if len(chunk_frames) < 5:
-                logger.info(f"  Skipping chunk at start_idx={start_idx}: only {len(chunk_frames)} frame(s) after adjustment (minimum is 5)")
-                continue
+                logger.info(
+                    f"  Skipping chunk at start_idx={start_idx}: "
+                    f"only {len(chunk_frames)} frame(s) after adjustment (minimum is 5)"
+                )
+                return
 
             chunks.append((chunk_frames, chunk_frame_ids, start_idx, end_idx))
-        
+
+        # Fixed first chunk starting at frame 0.
+        try_add_chunk(0)
+
+        # Offset tiling covers the rest of the episode with randomised
+        # boundaries.  r is sampled once per episode in sampled-frame units so
+        # the (n-1)%4==0 constraint is automatically satisfied for every chunk.
+        # Skipped for short episodes that don't extend beyond the first chunk.
+        if total_frames > self.chunk_size:
+            r = np.random.randint(1, self.chunk_size)
+            for start_idx in range(r, total_frames, self.chunk_size):
+                try_add_chunk(start_idx)
+
         return chunks
     
     def frames_to_tensor(self, frames):
         """
-        将PIL图像列表转换为归一化的视频tensor
+        将RGB np.ndarray列表转换为归一化的视频tensor
         
         Args:
-            frames: list of PIL Images
+            frames: list of np.ndarray(H, W, 3), RGB
             
         Returns:
             tensor: [3, F, H, W] 归一化到[-1, 1]
         """
-        tensors = []
-        for frame in frames:
-            # 转换为tensor并归一化到[-1, 1]
-            tensor = TF.to_tensor(frame).sub_(0.5).div_(0.5)
-            tensors.append(tensor)
-        
-        # [F, 3, H, W] -> [3, F, H, W]
-        video_tensor = torch.stack(tensors, dim=1)
+        if len(frames) == 0:
+            raise ValueError("frames_to_tensor got empty frame list")
+        # [F, H, W, C] uint8 -> [F, C, H, W] float in [-1, 1]
+        arr = np.stack(frames, axis=0)
+        tensor = torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous().float().div_(255.0)
+        tensor = tensor.sub_(0.5).div_(0.5)
+        # [F, C, H, W] -> [C, F, H, W]
+        video_tensor = tensor.permute(1, 0, 2, 3).contiguous()
         return video_tensor
 
 
@@ -701,7 +760,16 @@ def main():
     if not videos_dir.exists():
         logger.error(f"Videos directory not found: {videos_dir}")
         return
-    
+
+    # Refuse to run if latents/ already exists and contains files, to prevent
+    # silent overwrites of a partially or fully completed extraction.
+    if latents_dir.exists() and any(latents_dir.rglob('*.pth')):
+        logger.error(
+            f"latents directory already contains .pth files: {latents_dir}\n"
+            "  Remove or rename it before re-running extraction."
+        )
+        return
+
     # 创建latents目录
     latents_dir.mkdir(parents=True, exist_ok=True)
     
