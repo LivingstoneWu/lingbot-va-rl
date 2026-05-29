@@ -12,7 +12,7 @@ MASTER_PORT=${MASTER_PORT:-"29502"}
 PORT=${PORT:-"1107"}
 LOG_RANK=${LOG_RANK:-"0"}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
-CONFIG_NAME=${CONFIG_NAME:-"ma_final_config"}
+CONFIG_NAME=${CONFIG_NAME:-"va_robotwin_jepatrain_full_cfg"}
 
 overrides=""
 if [ $# -ne 0 ]; then
@@ -52,3 +52,6 @@ PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" TORCHFT_LIGHTHOUSE=${torchft_
      --tee 3 \
      -m wan_va.train --config-name ${config_name} $overrides
 #python    -m wan_va.train --config-name ${config_name} $overrides
+
+    #  --log-dir training_logs \
+    #  --redirects 3 \

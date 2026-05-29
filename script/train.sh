@@ -7,12 +7,12 @@ umask 007
 cd /liujinxin/code/lhc/wy/wms/lingbot-va
 source /liujinxin/conda3/bin/activate wy-lingbotva
  
-NGPU=${NGPU:-"4"}
+NGPU=${NGPU:-"8"}
 MASTER_PORT=${MASTER_PORT:-"29504"}
 PORT=${PORT:-"1109"}
 LOG_RANK=${LOG_RANK:-"0"}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
-CONFIG_NAME=${CONFIG_NAME:-"rc_aloha_pencil_case"}
+CONFIG_NAME=${CONFIG_NAME:-"rc_aloha_base_config"}
 
 overrides=""
 if [ $# -ne 0 ]; then
@@ -41,7 +41,7 @@ torchft_lighthouse=${TORCHFT_LIGHTHOUSE}
 config_name=${CONFIG_NAME}
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+# export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 ## cmd setting
 export TOKENIZERS_PARALLELISM=false

@@ -37,6 +37,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from diffusers.utils import export_to_video
+from diffusers.video_processor import VideoProcessor
 
 # ── ensure project root is on the path ───────────────────────────────────────
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -78,8 +80,42 @@ def prepare_server(server: VA_Server, text_emb: torch.Tensor):
     server.negative_prompt_embeds = emb   # unused when use_cfg=False
 
 
+@torch.no_grad()
+def decode_pred_latents_to_video_np(server: VA_Server, latents: torch.Tensor) -> np.ndarray:
+    """
+    Decode normalized WAN latents [B,C,F,H,W] to numpy video frames.
+    """
+    if latents.ndim != 5:
+        raise ValueError(f"Expected latents [B,C,F,H,W], got {tuple(latents.shape)}")
+    if latents.shape[0] != 1:
+        raise ValueError(f"Expected batch size B=1, got {latents.shape[0]}")
+
+    vae = server.vae
+    vae_device = next(vae.parameters()).device
+    vae_dtype = next(vae.parameters()).dtype
+
+    latents = latents.to(vae_device).to(vae_dtype)
+    latents_mean = (
+        torch.tensor(vae.config.latents_mean)
+        .view(1, vae.config.z_dim, 1, 1, 1)
+        .to(vae_device, vae_dtype)
+    )
+    latents_std = (
+        1.0
+        / torch.tensor(vae.config.latents_std)
+        .view(1, vae.config.z_dim, 1, 1, 1)
+        .to(vae_device, vae_dtype)
+    )
+    latents = latents / latents_std + latents_mean
+
+    video = vae.decode(latents, return_dict=False)[0]
+    video_np = VideoProcessor(vae_scale_factor=1).postprocess_video(video, output_type="np")[0]
+    return video_np
+
+
 def run_sample(server: VA_Server, sample: dict, sample_dir: Path,
-               kv_cache_window: int = 1, num_chunks: int = 3) -> dict | None:
+               kv_cache_window: int = 1, num_chunks: int = 3,
+               video_fps: int = 10) -> dict | None:
     """
     Run multi-chunk inference following the actual deployment flow:
 
@@ -196,7 +232,29 @@ def run_sample(server: VA_Server, sample: dict, sample_dir: Path,
     np.save(sample_dir / 'gt_actions_denorm.npy',   gt_all)
 
     # Save per-chunk latents stacked along the frame dimension
-    torch.save(torch.cat(all_latents, dim=2), sample_dir / 'pred_latents.pt')
+    pred_latents_cat = torch.cat(all_latents, dim=2)
+    torch.save(pred_latents_cat, sample_dir / 'pred_latents.pt')
+    try:
+        pred_video_np = decode_pred_latents_to_video_np(server, pred_latents_cat)
+
+        # GT latents for the same window: (C, F_used, H, W) → (1, C, F_used, H, W)
+        F_used = num_chunks * frame_chunk_size
+        gt_latents_cat = (
+            latent[:, f_start:f_start + F_used]
+            .unsqueeze(0)
+            .to(server.device, server.dtype)
+        )
+        gt_video_np = decode_pred_latents_to_video_np(server, gt_latents_cat)
+
+        # Stack GT (top) and pred (bottom) along the height axis for each frame.
+        # Both lists are length F_used, each element is (H, W, C) float32 in [0, 1].
+        combined = [
+            np.concatenate([g, p], axis=0)
+            for g, p in zip(gt_video_np, pred_video_np)
+        ]
+        export_to_video(combined, str(sample_dir / 'pred_video.mp4'), fps=video_fps)
+    except Exception as e:
+        print(f"  WARNING: failed to decode/save pred_video.mp4: {e}")
 
     # ── compute error in normalised action space (per chunk, then aggregate) ──
     chunk_stats = []
@@ -258,6 +316,8 @@ def main():
                         help='Latent frames fed to _compute_kv_cache each update')
     parser.add_argument('--output_dir', default='./test_inference_out',
                         help='Directory to write per-sample results and summary')
+    parser.add_argument('--video_fps', type=int, default=10,
+                        help='FPS used when saving decoded pred_video.mp4')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -297,7 +357,8 @@ def main():
         sample_dir = output_dir / f"sample_{i:03d}_idx{idx}"
         stats = run_sample(server, sample, sample_dir,
                            kv_cache_window=args.kv_cache_window,
-                           num_chunks=args.num_chunks)
+                           num_chunks=args.num_chunks,
+                           video_fps=args.video_fps)
         if stats is None:
             continue
         all_stats.append({'dataset_idx': idx, **stats})

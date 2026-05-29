@@ -397,9 +397,8 @@ def main():
     # ── Config ────────────────────────────────────────────────────────────────
     config = load_config(args.config)
     if args.eval_model_path:
-        for attr in ('wan22_finetuned_model_name_or_path'):
-            if hasattr(config, attr):
-                setattr(config, attr, args.eval_model_path)
+        config.wan22_finetuned_model_name_or_path = args.eval_model_path
+                
     config.local_rank  = 0
     config.rank        = 0
     config.world_size  = 1

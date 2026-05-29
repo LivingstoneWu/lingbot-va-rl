@@ -122,6 +122,12 @@ class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
         local_idx = idx - self.acc_dset_num[self.item_id_to_dataset_id[idx]]
         return cur_dset[local_idx]
 
+    def get_missing_jepa_files(self) -> list[str]:
+        missing: list[str] = []
+        for ds in self._datasets:
+            missing.extend(ds.get_missing_jepa_files())
+        return missing
+
 class LatentLeRobotDataset(LeRobotDataset):
     def __init__(
         self,
@@ -159,6 +165,9 @@ class LatentLeRobotDataset(LeRobotDataset):
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
         
         self.latent_path = Path(repo_id) / 'latents'
+        self.jepa_loss_enabled = getattr(config, 'jepa_loss_enabled', False)
+        if self.jepa_loss_enabled:
+            self.jepa_path = Path(repo_id) / 'jepa'
         self.empty_emb = torch.load(config.empty_emb_path, weights_only=False)
         self.config = config
         self.cfg_prob = config.cfg_prob
@@ -403,6 +412,138 @@ class LatentLeRobotDataset(LeRobotDataset):
         action_aligned *= action_mask_aligned
         return torch.from_numpy(action_aligned).float(), torch.from_numpy(action_mask_aligned).bool()
 
+    def _load_jepa_target(
+        self, episode_index: int, F_real: int,
+        latent_h: int = 0, latent_w: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Load and temporally align JEPA features for one episode.
+
+        Temporal alignment (single-chunk-per-episode assumed):
+            VAE latent 0        → JEPA token 0           (prepended duplicate frame)
+            VAE latent j (j≥1)  → mean(token 2j-1, token 2j)
+
+        Spatially, per-camera features are concatenated to match _cat_video_latents,
+        then 2×2 avg-pooled to match the DiT token grid (patch_size=(1,2,2)).
+
+        latent_h / latent_w: combined spatial dims of the VAE latent for this
+        episode (shape[2] / shape[3] of the [C,F,H,W] tensor).  Used to size
+        the zero-fallback tensor correctly: H_tok = latent_h // 2, W_tok = latent_w // 2.
+
+        Returns (jepa_target [F_real, H_tok, W_tok, D], jepa_available scalar bool).
+        """
+        episode_chunk = self.meta.get_episode_chunk(episode_index)
+        jepa_file = (
+            self.jepa_path
+            / f'chunk-{episode_chunk:03d}'
+            / f'episode_{episode_index:06d}.pt'
+        )
+
+        def _zero(d=1664):
+            # Zero fallback sized to the DiT token grid: latent_h//2 × latent_w//2.
+            # latent_h/w are the combined (post-cat) VAE latent spatial dims passed
+            # in from __getitem__, so this is always correct regardless of env_type.
+            h_tok = latent_h // 2 if latent_h else 1
+            w_tok = latent_w // 2 if latent_w else 1
+            return torch.zeros(F_real, h_tok, w_tok, d, dtype=torch.bfloat16)
+
+        if not jepa_file.exists():
+            print(f'[JEPA] Missing: {jepa_file}')
+            return _zero(), torch.tensor(False)
+
+        try:
+            jepa_data = torch.load(jepa_file, weights_only=False)
+
+            aligned_list: list[torch.Tensor] = []
+            for cam_key in self.used_video_keys:
+                if cam_key not in jepa_data:
+                    ref = next(
+                        (jepa_data[k] for k in jepa_data if k != 'frame_ids'), None
+                    )
+                    H_p = ref.shape[1] if ref is not None else 16
+                    W_p = ref.shape[2] if ref is not None else 16
+                    D   = ref.shape[3] if ref is not None else 1664
+                    aligned_list.append(
+                        torch.zeros(F_real, H_p, W_p, D, dtype=torch.bfloat16)
+                    )
+                    continue
+
+                feats = jepa_data[cam_key]       # [T_jepa, H', W', D]
+                H_p, W_p, D = feats.shape[1], feats.shape[2], feats.shape[3]
+
+                # Temporal alignment: F_real latent frames → 2*(F_real-1)+1 JEPA tokens
+                # Latent 0      → JEPA token 0  (prepended duplicate frame)
+                # Latent j≥1   → mean(token 2j-1, token 2j)
+                #
+                # Robustness: when T_jepa is even, feats[1::2] is one token longer
+                # than feats[2::2] (last odd index has no paired even token).  We
+                # take min(len(odd), len(even)) pairs and repeat the last valid
+                # frame for any remaining latent slots instead of crashing.
+                aligned = torch.empty(F_real, H_p, W_p, D, dtype=torch.float32)
+                aligned[0] = feats[0].float()
+                if F_real > 1:
+                    tok_odd  = feats[1::2].float()   # all odd-indexed tokens
+                    tok_even = feats[2::2].float()   # all even-indexed tokens
+                    n_pairs  = min(len(tok_odd), len(tok_even), F_real - 1)
+                    if n_pairs > 0:
+                        aligned[1 : 1 + n_pairs] = (
+                            tok_odd[:n_pairs] + tok_even[:n_pairs]
+                        ) * 0.5
+                    if n_pairs < F_real - 1:
+                        # Repeat the last valid aligned frame for the shortfall
+                        last = aligned[n_pairs] if n_pairs > 0 else aligned[0]
+                        aligned[1 + n_pairs :] = last.unsqueeze(0).expand(
+                            F_real - 1 - n_pairs, -1, -1, -1
+                        )
+                aligned_list.append(aligned.to(torch.bfloat16))
+
+            # Spatial concat matching _cat_video_latents (concat along W', dim=2)
+            if self.config.env_type == 'robotwin_tshape':
+                wrist = torch.cat(aligned_list[1:], dim=2)   # [F, H', W'*2, D]
+                jepa_target = torch.cat([wrist, aligned_list[0]], dim=1)
+            else:
+                jepa_target = torch.cat(aligned_list, dim=2)  # [F, H', W'*n, D]
+
+            # JEPA patches are 16×16 px; the DiT further patchifies the VAE latent
+            # by patch_size=(1,2,2), so each DiT token covers 32×32 px.  Pool the
+            # JEPA tokens 2×2 spatially so jepa_target matches the DiT token grid.
+            jepa_target = (
+                jepa_target                              # [F, H', W', D]
+                .permute(0, 3, 1, 2)                    # [F, D, H', W']
+                .contiguous()
+            )
+            jepa_target = torch.nn.functional.avg_pool2d(
+                jepa_target, kernel_size=2, stride=2
+            )                                            # [F, D, H'//2, W'//2]
+            jepa_target = jepa_target.permute(0, 2, 3, 1).to(torch.bfloat16)  # [F, H'//2, W'//2, D]
+
+            return jepa_target, torch.tensor(True)
+
+        except Exception as exc:
+            print(f'[JEPA] Error loading {jepa_file}: {exc}')
+            return _zero(), torch.tensor(False)
+
+    def get_missing_jepa_files(self) -> list[str]:
+        """Return paths of JEPA episode files that do not yet exist on disk."""
+        if not self.jepa_loss_enabled:
+            return []
+        missing: list[str] = []
+        seen: set[int] = set()
+        for meta in self.new_metas:
+            ep_idx = meta['episode_index']
+            if ep_idx in seen:
+                continue
+            seen.add(ep_idx)
+            ep_chunk = self.meta.get_episode_chunk(ep_idx)
+            jepa_file = (
+                self.jepa_path
+                / f'chunk-{ep_chunk:03d}'
+                / f'episode_{ep_idx:06d}.pt'
+            )
+            if not jepa_file.exists():
+                missing.append(str(jepa_file))
+        return missing
+
     def __getitem__(self, idx) -> dict:
         idx = idx % len(self.new_metas)
         cur_meta = self.new_metas[idx]
@@ -439,11 +580,19 @@ class LatentLeRobotDataset(LeRobotDataset):
         )
 
         out_dict['latents'] = out_dict['latents'].permute(3, 0, 1, 2)   # (C, F, H, W)
+        F_real    = out_dict['latents'].shape[1]
+        latent_h  = out_dict['latents'].shape[2]
+        latent_w  = out_dict['latents'].shape[3]
+
+        # ── JEPA target loading ───────────────────────────────────────────────
+        if self.jepa_loss_enabled:
+            out_dict['jepa_target'], out_dict['jepa_available'] = (
+                self._load_jepa_target(episode_index, F_real, latent_h, latent_w)
+            )
 
         # ── Pad F dimension to max_latent_frames ──────────────────────────────
         # Chunks vary in latent frame count (shorter at episode boundaries).
         # Padding to a fixed max lets the default collate stack a batch of B > 1.
-        F_real = out_dict['latents'].shape[1]
         # MYEDIT: noticed that padding with batch_size = 1 causes significant delays, only pad when batch_size > 1
         if self.config.batch_size == 1:
             F_max = F_real
@@ -465,6 +614,12 @@ class LatentLeRobotDataset(LeRobotDataset):
             out_dict['actions_mask'] = torch.nn.functional.pad(
                 out_dict['actions_mask'].float(), f_pad
             ).bool()
+            # jepa_target [F, H', W', D]: F is dim-0, so pad tuple has 4 pairs.
+            if self.jepa_loss_enabled:
+                jepa_f_pad = (0, 0, 0, 0, 0, 0, 0, F_pad)
+                out_dict['jepa_target'] = torch.nn.functional.pad(
+                    out_dict['jepa_target'], jepa_f_pad
+                )
 
         # Frame-level validity mask: True = real latent frame, False = padding.
         # Shape (F_max,); after collate becomes (B, F_max).

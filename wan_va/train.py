@@ -34,6 +34,7 @@ from einops import rearrange
 from modules.utils import (
     load_transformer,
 )
+from modules.model import JepaProjectionHead
 from utils import (
     init_logger, 
     logger, 
@@ -46,6 +47,7 @@ from utils import (
 
 from dataset import MultiLatentLeRobotDataset
 import gc
+import re
 
 
 def _config_to_dict(cfg) -> dict:
@@ -131,9 +133,34 @@ class Trainer:
         self.transformer.train()
         self.transformer.requires_grad_(True)
 
+        # ── JEPA projection head (separate from FSDP transformer) ────────────
+        if getattr(config, 'jepa_loss_enabled', False):
+            self.jepa_head = JepaProjectionHead(
+                inner_dim=3072,   # 24 heads × 128 dim
+                jepa_dim=1664,    # JEPA ViT-Gigantic embed_dim
+                head_type=config.jepa_head_type,
+            ).to(device=self.device, dtype=self.dtype)
+            self.jepa_head.train()
+            self.jepa_head.requires_grad_(True)
+            if hasattr(config, 'resume_from') and config.resume_from:
+                jepa_head_resume = Path(config.resume_from) / "jepa_head.pt"
+                if jepa_head_resume.exists():
+                    self.jepa_head.load_state_dict(
+                        torch.load(jepa_head_resume, map_location=self.device, weights_only=True)
+                    )
+                    if config.rank == 0:
+                        logger.info(f"Loaded jepa_head from {jepa_head_resume}")
+                elif config.rank == 0:
+                    logger.warning(f"[JEPA] resume_from set but no jepa_head.pt found at {jepa_head_resume}")
+        else:
+            self.jepa_head = None
+
         # Optimizer
+        trainable_params = [p for p in self.transformer.parameters() if p.requires_grad]
+        if self.jepa_head is not None:
+            trainable_params += list(self.jepa_head.parameters())
         self.optimizer = torch.optim.AdamW(
-            [p for p in self.transformer.parameters() if p.requires_grad],
+            trainable_params,
             lr=config.learning_rate,
             betas=(config.beta1, config.beta2),
             eps=1e-8,
@@ -193,7 +220,21 @@ class Trainer:
                 json.dump(_config_to_dict(config), _f, indent=2)
             logger.info(f"Config saved to {config_save_path}")
 
+            if getattr(config, 'jepa_loss_enabled', False):
+                missing = train_dataset.get_missing_jepa_files()
+                if missing:
+                    missing_log = self.save_dir / 'missing_jepa.log'
+                    missing_log.write_text('\n'.join(missing) + '\n')
+                    logger.warning(
+                        f"[JEPA] {len(missing)} missing JEPA file(s) — "
+                        f"see {missing_log}"
+                    )
+                else:
+                    logger.info("[JEPA] All JEPA feature files present.")
+
         self.gradient_accumulation_steps = getattr(config, 'gradient_accumulation_steps', 1)
+        self.grad_log_freq   = getattr(config, 'grad_log_freq', 0)
+        self.grad_stats_file = self.save_dir / 'grad_stats.jsonl'
         self.train_loader_iter = None
         # if hasattr(config, 'resume_from') and config.resume_from:
         #     self._load_training_state(config.resume_from)
@@ -355,39 +396,426 @@ class Trainer:
 
         return latent_loss / self.gradient_accumulation_steps, action_loss / self.gradient_accumulation_steps
 
+    def compute_jepa_loss(
+        self,
+        jepa_hidden: torch.Tensor,
+        batch: dict,
+        input_dict: dict,
+    ) -> torch.Tensor:
+        """
+        Cosine similarity loss between projected DiT hidden states and JEPA targets.
+
+        jepa_hidden: [1, B*F*H_tokens*W_tokens, inner_dim] — noisy-latent stream
+                     at config.jepa_loss_layer, captured inside forward_train.
+
+        jepa_target in the batch is already 2×2-pooled in the dataset loader so
+        that its spatial dims match the DiT token grid (VAE stride 16px per cell,
+        DiT patch_size (1,2,2) → 32px per token; JEPA patch 16px → pool by 2).
+        Returns the unscaled mean loss (caller divides by gradient_accumulation_steps).
+        """
+        jepa_target    = batch['jepa_target']          # [B, F, H_tok, W_tok, D]  bfloat16
+        jepa_available = batch.get('jepa_available')   # [B] float (0 or 1 after convert)
+        latent_dict    = input_dict['latent_dict']
+
+        B     = latent_dict['noisy_latents'].shape[0]
+        F_lat = latent_dict['noisy_latents'].shape[2]
+        H_tok = latent_dict['noisy_latents'].shape[3] // self.patch_size[1]
+        W_tok = latent_dict['noisy_latents'].shape[4] // self.patch_size[2]
+
+        assert jepa_target.shape[2] == H_tok and jepa_target.shape[3] == W_tok, (
+            f"JEPA target spatial dims {jepa_target.shape[2:][:2]} do not match "
+            f"DiT token grid ({H_tok}, {W_tok}). "
+            f"Check that JEPA features were extracted at native camera resolution "
+            f"and that _load_jepa_target applied 2×2 avg-pool."
+        )
+
+        # Reshape hidden states to match spatial layout of jepa_target
+        hidden = jepa_hidden.squeeze(0).reshape(B, F_lat, H_tok, W_tok, -1)
+
+        # Project: [B, F, H', W', inner_dim] → [B, F, H', W', jepa_dim]
+        jepa_pred = self.jepa_head(hidden.to(self.dtype))
+
+        # L2-normalise both sides; dot product = cosine similarity
+        jepa_pred   = F.normalize(jepa_pred.float(),              dim=-1)
+        jepa_target = F.normalize(jepa_target.float(),            dim=-1)
+
+        cos_sim       = (jepa_pred * jepa_target).sum(dim=-1)  # [B, F, H', W']
+        loss_per_frame = 1.0 - cos_sim.mean(dim=(-2, -1))     # [B, F]
+
+        # Validity mask: real latent frames, within timestep gate, available samples
+        lm     = latent_dict['latents_mask'].float()           # [B, F]
+        # timesteps are in [0, num_train_timesteps] (= sigmas * 1000); normalise
+        # so jepa_loss_t_max stays in the intuitive [0, 1] range in the config.
+        # t_max = 1.0 → all timesteps contribute; 0.8 → top-80%-noise only.
+        t_norm = latent_dict['timesteps'].float() / self.train_scheduler_latent.num_train_timesteps
+        t_gate = (t_norm < self.config.jepa_loss_t_max).float()
+
+        if jepa_available is not None:
+            avail = jepa_available.float().view(B, 1)
+        else:
+            avail = torch.ones(B, 1, device=self.device)
+
+        mask = lm * t_gate * avail                             # [B, F]
+        denom = mask.sum() + 1e-6
+        return (loss_per_frame * mask).sum() / denom
+
     def _train_step(self, batch, batch_idx):
         """Train a single batch, returns losses for logging."""
         batch = self.convert_input_format(batch)
         input_dict = self._prepare_input_dict(batch)
-        
+
         should_sync = (batch_idx + 1) % self.gradient_accumulation_steps == 0
-        
+
         if not should_sync:
             self.transformer.set_requires_gradient_sync(False)
         else:
             self.transformer.set_requires_gradient_sync(True)
 
-        output = self.transformer(input_dict, train_mode=True)
-        latent_loss, action_loss = self.compute_loss(input_dict, output)
-        loss = latent_loss + action_loss
+        jepa_layer = (
+            self.config.jepa_loss_layer
+            if getattr(self.config, 'jepa_loss_enabled', False)
+            else -1
+        )
+        latent_pred, action_pred, jepa_hidden = self.transformer(
+            input_dict, train_mode=True, jepa_capture_layer=jepa_layer
+        )
+        latent_loss, action_loss = self.compute_loss(
+            input_dict, (latent_pred, action_pred)
+        )
 
+        jepa_loss_raw = torch.tensor(0.0, device=self.device)
+        if self.jepa_head is not None and jepa_hidden is not None:
+            jepa_loss_raw = self.compute_jepa_loss(jepa_hidden, batch, input_dict)
+
+        loss = (
+            latent_loss
+            + action_loss
+            + self.config.jepa_loss_weight
+            * jepa_loss_raw
+            / self.gradient_accumulation_steps
+        )
         loss.backward()
 
-        losses = {'latent_loss': latent_loss.detach(), 'action_loss': action_loss.detach()}
-        
+        # Manually sync jepa_head gradients across ranks (head is not FSDP-wrapped).
+        if should_sync and self.jepa_head is not None and self.config.world_size > 1:
+            for p in self.jepa_head.parameters():
+                if p.grad is not None:
+                    dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+
+        losses = {
+            'latent_loss': latent_loss.detach(),
+            'action_loss': action_loss.detach(),
+            'jepa_loss': (jepa_loss_raw / self.gradient_accumulation_steps).detach(),
+        }
+
         # Only update weights after accumulating gradients
         if should_sync:
-            total_norm = torch.nn.utils.clip_grad_norm_(self.transformer.parameters(), 2.0)
+            # DTensor (FSDP2 transformer) and plain Tensor (jepa_head) cannot
+            # be mixed in a single clip_grad_norm_ call (_foreach_mul_ rejects
+            # heterogeneous tensor types).  Clip each group separately; the
+            # transformer call is identical to the pre-jepa version.
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                list(self.transformer.parameters()), 2.0
+            )
+            if self.jepa_head is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.jepa_head.parameters()), 2.0
+                )
             self.optimizer.step()
             self.lr_scheduler.step()
             self.optimizer.zero_grad()
-            
+
             losses['total_norm'] = total_norm
             losses['should_log'] = True
         else:
             losses['should_log'] = False
 
         return losses
+
+    # ── Gradient alignment helpers ──────────────────────────────────────────
+
+    @staticmethod
+    def _local_tensor(t: torch.Tensor) -> torch.Tensor:
+        """Return the plain local shard of a DTensor, or the tensor itself."""
+        if hasattr(t, 'to_local'):
+            return t.to_local()
+        return t
+
+    def _snapshot_block_grads(self) -> dict:
+        """
+        Collect this rank's gradient shards grouped by transformer block index.
+        Parameter names are expected to contain 'blocks.N.' somewhere (works with
+        and without FSDP wrapper prefixes).  Non-block parameters (embeddings,
+        final norms, …) are grouped under block_id -1.
+
+        IMPORTANT: we iterate ALL parameters (not just those with a non-None grad)
+        and substitute a zero tensor for missing grads.  Different loss terms
+        backprop through different heads, so some params will have grad=None for
+        some terms.  Keeping a consistent parameter ordering ensures every block's
+        flat tensor has the same length across terms so dot-products are valid.
+
+        Returns {block_id (int): flat float32 gradient tensor (local shard)}.
+        """
+        accum: dict = {}
+        for name, param in self.transformer.named_parameters():
+            # Get local shard of gradient, or zeros if this param wasn't touched
+            # by the current loss term's backward pass.
+            if param.grad is not None:
+                local_grad = self._local_tensor(param.grad).detach().float().flatten()
+            else:
+                local_param = self._local_tensor(param.data)
+                local_grad  = torch.zeros(
+                    local_param.numel(), dtype=torch.float32,
+                    device=local_param.device
+                )
+            m = re.search(r'blocks\.(\d+)\.', name)
+            block_id = int(m.group(1)) if m else -1
+            accum.setdefault(block_id, []).append(local_grad)
+        return {bid: torch.cat(shards) for bid, shards in accum.items()}
+
+    def _write_grad_stats(
+        self,
+        block_grads_per_term: dict,
+        mean_t_latent: float,
+        mean_t_action: float,
+    ) -> None:
+        """
+        Compute per-block pairwise cosine similarities and gradient magnitudes
+        via a single all-reduce, then write one JSON record to grad_stats.jsonl.
+
+        Each rank contributes its local shard dot-products and squared norms;
+        the all-reduce sums them to recover global statistics without ever
+        materialising the full gradient tensors.  Only rank 0 writes the file.
+        """
+        terms    = list(block_grads_per_term.keys())
+        all_bids = sorted({
+            bid
+            for grads in block_grads_per_term.values()
+            for bid in grads
+        })
+        if len(terms) < 2 or not all_bids:
+            return
+
+        pairs = [(ta, tb) for i, ta in enumerate(terms) for tb in terms[i + 1:]]
+
+        # Build a flat scalar tensor for a single all-reduce:
+        #   per block: [sq_term0, sq_term1, …, dot_pair0, dot_pair1, …]
+        scalars: list = []
+        idx: dict = {}   # (bid, key) -> position
+
+        for bid in all_bids:
+            for term in terms:
+                g  = block_grads_per_term[term].get(bid)
+                sq = (g * g).sum() if g is not None else torch.zeros(
+                    1, device=self.device
+                ).squeeze()
+                idx[(bid, f'sq_{term}')] = len(scalars)
+                scalars.append(sq)
+            for (ta, tb) in pairs:
+                ga  = block_grads_per_term[ta].get(bid)
+                gb  = block_grads_per_term[tb].get(bid)
+                dot = (
+                    (ga * gb).sum()
+                    if (ga is not None and gb is not None)
+                    else torch.zeros(1, device=self.device).squeeze()
+                )
+                idx[(bid, f'dot_{ta}_{tb}')] = len(scalars)
+                scalars.append(dot)
+
+        stats = torch.stack(scalars)
+        if dist.is_initialized():
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+
+        if self.config.rank != 0:
+            return  # only rank 0 writes
+
+        block_stats: dict = {}
+        for bid in all_bids:
+            entry: dict = {}
+            for term in terms:
+                sq = stats[idx[(bid, f'sq_{term}')]].item()
+                entry[f'mag_{term}'] = round(sq ** 0.5, 6)
+            for (ta, tb) in pairs:
+                dot  = stats[idx[(bid, f'dot_{ta}_{tb}')]].item()
+                sq_a = stats[idx[(bid, f'sq_{ta}')]].item()
+                sq_b = stats[idx[(bid, f'sq_{tb}')]].item()
+                cos  = dot / ((sq_a ** 0.5) * (sq_b ** 0.5) + 1e-8)
+                entry[f'cos_{ta}_{tb}'] = round(float(cos), 6)
+            block_stats[str(bid)] = entry
+
+        record = {
+            'step':     self.step,
+            't_latent': round(mean_t_latent, 2),
+            't_action': round(mean_t_action, 2),
+            'blocks':   block_stats,
+        }
+        with open(self.grad_stats_file, 'a') as f:
+            f.write(json.dumps(record) + '\n')
+        logger.info(
+            f"Grad stats logged at step {self.step} "
+            f"({len(all_bids)} blocks, terms={terms})"
+        )
+
+    def _logging_window_step(self, raw_batches: list) -> dict:
+        """
+        Full logging-window optimizer step:
+          1. Prepare all K micro-batches (device transfer + noise sampling).
+          2. For each active loss term, run an isolated K-micro-batch backward
+             pass (with proper FSDP gradient sync on the last micro-batch) and
+             snapshot the per-block gradient shards.
+          3. All-reduce the shard statistics and write grad_stats.jsonl.
+          4. Run the regular combined backward over the same K micro-batches
+             (this is the update that actually changes the weights).
+          5. Clip, optimizer.step(), zero_grad().
+
+        The gradients captured in step 2 are the exact per-term contributions
+        to the combined gradient computed in step 4 (same batches, same noise,
+        same scaling), so the cosine similarities reflect what truly drove the
+        weight update at this optimizer step.
+
+        Returns a losses dict with keys:
+            micro_latent_losses, micro_action_losses, micro_jepa_losses,
+            total_norm, should_log=True
+        """
+        K = len(raw_batches)
+
+        # ── 1. Prepare all micro-batches ──────────────────────────────────
+        prepared = []   # list of (input_dict, converted_batch)
+        for raw in raw_batches:
+            batch     = self.convert_input_format(raw)
+            input_dict = self._prepare_input_dict(batch)
+            prepared.append((input_dict, batch))
+
+        # Representative mean timesteps (averaged over micro-batches)
+        mean_t_latent = float(
+            sum(inp['latent_dict']['timesteps'].float().mean().item()
+                for inp, _ in prepared) / K
+        )
+        mean_t_action = float(
+            sum(inp['action_dict']['timesteps'].float().mean().item()
+                for inp, _ in prepared) / K
+        )
+
+        jepa_enabled  = getattr(self.config, 'jepa_loss_enabled', False)
+        jepa_layer    = self.config.jepa_loss_layer if jepa_enabled else -1
+        active_terms  = ['latent', 'action']
+        if self.jepa_head is not None:
+            active_terms.append('jepa')
+
+        # ── 2. Per-loss gradient passes ───────────────────────────────────
+        block_grads_per_term: dict = {}
+
+        for term in active_terms:
+            self.optimizer.zero_grad()
+
+            for i, (input_dict, batch) in enumerate(prepared):
+                enable_sync   = (i == K - 1)
+                capture_layer = jepa_layer if term == 'jepa' else -1
+                self.transformer.set_requires_gradient_sync(enable_sync)
+
+                latent_pred, action_pred, jepa_hidden = self.transformer(
+                    input_dict, train_mode=True,
+                    jepa_capture_layer=capture_layer,
+                )
+
+                if term == 'latent':
+                    loss, _ = self.compute_loss(input_dict, (latent_pred, action_pred))
+                elif term == 'action':
+                    _, loss  = self.compute_loss(input_dict, (latent_pred, action_pred))
+                else:  # jepa
+                    if jepa_hidden is not None:
+                        jepa_raw = self.compute_jepa_loss(
+                            jepa_hidden, batch, input_dict
+                        )
+                        loss = (
+                            self.config.jepa_loss_weight
+                            * jepa_raw
+                            / self.gradient_accumulation_steps
+                        )
+                    else:
+                        # jepa_hidden unexpectedly None; skip this micro-batch
+                        continue
+
+                loss.backward()
+
+                # Sync jepa_head grads manually (not FSDP-wrapped) on last micro-step
+                if (enable_sync and term == 'jepa'
+                        and self.jepa_head is not None
+                        and self.config.world_size > 1):
+                    for p in self.jepa_head.parameters():
+                        if p.grad is not None:
+                            dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+
+            block_grads_per_term[term] = self._snapshot_block_grads()
+
+        # ── 3. Write grad stats ───────────────────────────────────────────
+        self._write_grad_stats(block_grads_per_term, mean_t_latent, mean_t_action)
+
+        # ── 4. Regular combined backward (the actual update) ──────────────
+        self.optimizer.zero_grad()
+        micro_latent_losses: list = []
+        micro_action_losses: list = []
+        micro_jepa_losses:   list = []
+
+        for i, (input_dict, batch) in enumerate(prepared):
+            enable_sync = (i == K - 1)
+            self.transformer.set_requires_gradient_sync(enable_sync)
+
+            latent_pred, action_pred, jepa_hidden = self.transformer(
+                input_dict, train_mode=True, jepa_capture_layer=jepa_layer
+            )
+            latent_loss, action_loss = self.compute_loss(
+                input_dict, (latent_pred, action_pred)
+            )
+
+            jepa_loss_raw = torch.tensor(0.0, device=self.device)
+            if self.jepa_head is not None and jepa_hidden is not None:
+                jepa_loss_raw = self.compute_jepa_loss(
+                    jepa_hidden, batch, input_dict
+                )
+
+            loss = (
+                latent_loss
+                + action_loss
+                + self.config.jepa_loss_weight
+                * jepa_loss_raw
+                / self.gradient_accumulation_steps
+            )
+            loss.backward()
+
+            if (enable_sync and self.jepa_head is not None
+                    and self.config.world_size > 1):
+                for p in self.jepa_head.parameters():
+                    if p.grad is not None:
+                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+
+            micro_latent_losses.append(latent_loss.detach())
+            micro_action_losses.append(action_loss.detach())
+            micro_jepa_losses.append(
+                (jepa_loss_raw / self.gradient_accumulation_steps).detach()
+            )
+
+        # ── 5. Optimizer step ─────────────────────────────────────────────
+        # Clip transformer (DTensor) and jepa_head (plain Tensor) separately
+        # to avoid the _foreach_mul_ mixed-type error.
+        total_norm = torch.nn.utils.clip_grad_norm_(
+            list(self.transformer.parameters()), 2.0
+        )
+        if self.jepa_head is not None:
+            torch.nn.utils.clip_grad_norm_(
+                list(self.jepa_head.parameters()), 2.0
+            )
+        self.optimizer.step()
+        self.lr_scheduler.step()
+        self.optimizer.zero_grad()
+
+        return {
+            'micro_latent_losses': micro_latent_losses,
+            'micro_action_losses': micro_action_losses,
+            'micro_jepa_losses':   micro_jepa_losses,
+            'total_norm':          total_norm,
+            'should_log':          True,
+        }
 
     def save_checkpoint(self,):
         """Save model checkpoint in the same format as pretrained model."""
@@ -433,6 +861,11 @@ class Trainer:
                 #     'optimizer_state_dict': optim_state,
                 #     'config': vars(self.config),
                 # }, training_state_path)
+
+                if self.jepa_head is not None:
+                    jepa_head_path = checkpoint_dir / "jepa_head.pt"
+                    torch.save(self.jepa_head.state_dict(), jepa_head_path)
+                    logger.info(f"Saved jepa_head to {jepa_head_path}")
 
                 logger.info(f"Checkpoint saved successfully at step {self.step}")
 
@@ -497,18 +930,41 @@ class Trainer:
         self.optimizer.zero_grad()
         accumulated_latent_losses = []
         accumulated_action_losses = []
+        accumulated_jepa_losses   = []
         step_in_accumulation = 0
 
         while self.step < self.config.num_steps:
-            # Get next batch (handles epoch reset automatically)
-            batch = self._get_next_batch()
-            
-            losses = self._train_step(batch, step_in_accumulation)
-            
-            # Accumulate losses for logging
-            accumulated_latent_losses.append(losses['latent_loss'])
-            accumulated_action_losses.append(losses['action_loss'])
-            step_in_accumulation += 1
+            # ── Detect start of a gradient-logging accumulation window ──────
+            # Check at step_in_accumulation==0 (window boundary) only.
+            # self.step==0 satisfies the modulo for any grad_log_freq, so the
+            # very first optimizer step is always a logging step when enabled.
+            is_logging_window = (
+                step_in_accumulation == 0
+                and self.grad_log_freq > 0
+                and self.step % self.grad_log_freq == 0
+            )
+
+            if is_logging_window:
+                # Collect all K micro-batches up front so we can replay them
+                # for the per-loss isolated passes AND the combined update pass.
+                raw_batches = [
+                    self._get_next_batch()
+                    for _ in range(self.gradient_accumulation_steps)
+                ]
+                losses = self._logging_window_step(raw_batches)
+                # _logging_window_step already ran the optimizer step; pop the
+                # per-micro-batch loss lists before entering the logging block.
+                accumulated_latent_losses.extend(losses.pop('micro_latent_losses'))
+                accumulated_action_losses.extend(losses.pop('micro_action_losses'))
+                accumulated_jepa_losses.extend(losses.pop('micro_jepa_losses'))
+            else:
+                # Normal single micro-batch step
+                batch  = self._get_next_batch()
+                losses = self._train_step(batch, step_in_accumulation)
+                accumulated_latent_losses.append(losses['latent_loss'])
+                accumulated_action_losses.append(losses['action_loss'])
+                accumulated_jepa_losses.append(losses['jepa_loss'])
+                step_in_accumulation += 1
 
             # Log and checkpoint when optimizer steps
             if losses['should_log']:
@@ -517,12 +973,14 @@ class Trainer:
                 # Average accumulated losses
                 latent_loss_show = dist_mean(torch.stack(accumulated_latent_losses).sum()).detach().cpu().item()
                 action_loss_show = dist_mean(torch.stack(accumulated_action_losses).sum()).detach().cpu().item()
+                jepa_loss_show   = dist_mean(torch.stack(accumulated_jepa_losses).sum()).detach().cpu().item()
                 max_latent_loss_show = dist_max(torch.stack(accumulated_latent_losses).sum()).detach().cpu().item()
                 max_action_loss_show = dist_max(torch.stack(accumulated_action_losses).sum()).detach().cpu().item()
 
                 # Clear accumulated losses
                 accumulated_latent_losses = []
                 accumulated_action_losses = []
+                accumulated_jepa_losses   = []
                 step_in_accumulation = 0
 
                 torch.cuda.synchronize()
@@ -535,18 +993,23 @@ class Trainer:
                     # Progress bar total is in optimizer steps (num_steps), so
                     # update by 1 after each optimizer step.
                     progress_bar.update(1)
-                    progress_bar.set_postfix({
+                    postfix = {
                         'latent_loss': f'{latent_loss_show:.4f}',
                         'action_loss': f'{action_loss_show:.4f}',
                         'step': self.step,
                         'grad_norm': f'{total_norm.item():.2f}',
-                        'lr': f'{lr:.2e}'
-                    })
+                        'lr': f'{lr:.2e}',
+                    }
+                    if getattr(self.config, 'jepa_loss_enabled', False):
+                        postfix['jepa_loss'] = f'{jepa_loss_show:.4f}'
+                    progress_bar.set_postfix(postfix)
                     logger.info(
                         f"step={self.step} "
                         f"latent_loss={latent_loss_show:.4f} "
                         f"action_loss={action_loss_show:.4f} "
-                        f"total_loss={latent_loss_show + action_loss_show:.4f} "
+                        + (f"jepa_loss={jepa_loss_show:.4f} "
+                           if getattr(self.config, 'jepa_loss_enabled', False) else "")
+                        + f"total_loss={latent_loss_show + action_loss_show:.4f} "
                         f"grad_norm={total_norm.item():.4f} "
                         f"lr={lr:.2e}"
                     )
@@ -562,17 +1025,22 @@ class Trainer:
                             'grad_norm': round(total_norm.item(), 6),
                             'lr': lr,
                         }
+                        if getattr(self.config, 'jepa_loss_enabled', False):
+                            log_entry['jepa_loss'] = round(jepa_loss_show, 6)
                         with open(self.log_file, 'a') as f:
                             f.write(json.dumps(log_entry) + '\n')
                     if self.config.enable_wandb:
-                        self.wandb.log({
+                        wandb_log = {
                             'loss_metrics/global_avg_video_loss': latent_loss_show,
                             'loss_metrics/global_avg_action_loss': action_loss_show,
                             'loss_metrics/global_max_video_loss': max_latent_loss_show,
                             'loss_metrics/global_max_action_loss': max_action_loss_show,
                             'grad_norm': total_norm.item(),
                             'lr': lr,
-                        }, step=self.step)
+                        }
+                        if getattr(self.config, 'jepa_loss_enabled', False):
+                            wandb_log['loss_metrics/jepa_loss'] = jepa_loss_show
+                        self.wandb.log(wandb_log, step=self.step)
                 
                 self.step += 1
                 

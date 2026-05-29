@@ -3,7 +3,7 @@ from .va_franka_cfg import va_franka_cfg
 from .va_robotwin_cfg import va_robotwin_cfg
 from .va_franka_i2va import va_franka_i2va_cfg
 from .va_robotwin_i2va import va_robotwin_i2va_cfg
-from .va_robotwin_train_cfg import va_robotwin_train_cfg
+from .va_robotwin_train_cfg import *
 from .va_demo_train_cfg import va_demo_train_cfg
 from .va_demo_cfg import va_demo_cfg
 from .va_demo_i2va import va_demo_i2va_cfg
@@ -38,4 +38,8 @@ VA_CONFIGS = {
     'ma_final_config': ma_final_config,
     'rc_arx5_wipe_table': rc_arx5_wipe_table,
     'rc_franka_press_button': rc_franka_press_button,
+    'va_robotwin_train10_cfg': va_robotwin_train10_cfg,
+    'va_robotwin_jepatrain10_cfg': va_robotwin_jepatrain10_cfg,
+    'rc_aloha_base_config': rc_aloha_base_config,
+    'va_robotwin_jepatrain_full_cfg': va_robotwin_jepatrain_full_cfg,
 }

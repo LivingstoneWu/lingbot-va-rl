@@ -81,8 +81,10 @@ rc_arx5_arrange_flowers.min_lr = 1e-6
 rc_arx5_arrange_flowers.batch_size = 1
 rc_arx5_arrange_flowers.gradient_accumulation_steps = 2  # effective batch size = 2*8=16
 rc_arx5_arrange_flowers.num_steps = 6000
-rc_arx5_arrange_flowers.wan22_pretrained_model_name_or_path = "/liujinxin/code/lhc/wy/wms/lingbot-va/checkpoints/rc_arrange_flowers/bs16lr2.5e-5/checkpoints/checkpoint_step_2000"
+rc_arx5_arrange_flowers.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
+# rc_arx5_arrange_flowers.wan22_pretrained_model_name_or_path = "/liujinxin/code/lhc/wy/wms/lingbot-va/checkpoints/rc_arrange_flowers/bs16lr2.5e-5/checkpoints/checkpoint_step_2000"
 rc_arx5_arrange_flowers.save_root = "./checkpoints/rc_arrange_flowers/bs8lr2.5e-5_resume2000"
+rc_arx5_arrange_flowers.frame_chunk_size = 2
 
 
 rc_arx5_place_shoes = EasyDict(__name__='Config: RC ARX5 set the plates')
@@ -92,7 +94,9 @@ rc_arx5_place_shoes.norm_stat = {
     "q99": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.2087049, 2.0033188, 2.0204849, 0.85889244, 0.70019817, 0.78526783, 0, 0, 0, 0, 0, 0, 0, 0, 0.087184839, 0],
 }
 rc_arx5_place_shoes.save_root = './checkpoints/rc_place_shoes/bs8lr2.5e-5'
+rc_arx5_place_shoes.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
 rc_arx5_place_shoes.dataset_path = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/place_shoes_on_rack'
+rc_arx5_place_shoes.frame_chunk_size = 3
 
 rc_arx5_wipe_table = EasyDict(__name__='Config: RC ARX5 set the plates')
 rc_arx5_wipe_table.update(rc_arx5_arrange_flowers)

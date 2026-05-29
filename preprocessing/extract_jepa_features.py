@@ -46,11 +46,25 @@ Usage (multi-GPU via torchrun):
         --dataset-root  /data/robochallenge/scan_QR_code_trim_stage2_test \\
         --checkpoint    /checkpoints/vjepa2_1_vitG_384.pt \\
         --camera-keys   observation.images.left_wrist observation.images.front \\
-        --target-fps    10 \\
-        --height        256 \\
-        --width         256 \\
+        --target-fps    12.5 \\
+        --cam-resolutions observation.images.cam_high:256x320 \\
+                          observation.images.cam_left_wrist:128x160 \\
+                          observation.images.cam_right_wrist:128x160 \\
         --batch-size    4 \\
         --skip-existing
+
+Per-camera resolution (`--cam-resolutions`):
+    JEPA patches are 16×16 px, matching one VAE latent cell (also stride 16).
+    The DiT then patchifies with patch_size=(1,2,2), so each DiT token covers
+    32×32 px (2×2 latent cells).  To obtain JEPA targets that align with the
+    DiT token grid after a 2×2 avg-pool in the dataset loader, extract each
+    camera at its native resolution so that the token grid matches the VAE
+    latent spatial dimensions:
+        cam H_tokens = video_height / 16   (= VAE latent_height)
+        cam W_tokens = video_width  / 16   (= VAE latent_width)
+    The _DEFAULT_CAM_RESOLUTIONS dict below encodes known camera resolutions;
+    --cam-resolutions overrides it per camera; --height/--width is the final
+    fallback for unlisted cameras.
 
 Single-GPU:
     python preprocessing/extract_jepa_features.py --dataset-root ... --checkpoint ...
@@ -74,6 +88,19 @@ VJEPA_ROOT = REPO_ROOT / 'vjepa2'
 for _p in (str(VJEPA_ROOT), str(REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+# ── Default per-camera resolutions ───────────────────────────────────────────
+# Each camera should be extracted at its native video resolution so that the
+# JEPA token grid (patch 16px) matches the VAE latent spatial dimensions.
+# Add new camera keys here as new datasets are introduced.
+# These are overridden by --cam-resolutions on the CLI; cameras not found in
+# either fall back to --height / --width.
+_DEFAULT_CAM_RESOLUTIONS: dict[str, tuple[int, int]] = {
+    # RoboTwin T-shape rig: front camera 256×320, wrist cameras 128×160
+    'observation.images.cam_high':        (256, 320),
+    'observation.images.cam_left_wrist':  (128, 160),
+    'observation.images.cam_right_wrist': (128, 160),
+}
 
 # ImageNet normalisation (JEPA uses this, distinct from the VAE's [-1, 1])
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
@@ -240,20 +267,24 @@ def frames_to_tensor(frames: np.ndarray) -> torch.Tensor:
 
 @torch.inference_mode()
 def encode_batch(
-    encoder:      torch.nn.Module,
-    tensors:      list[torch.Tensor],   # each [1, 3, N, H, W] bfloat16
-    device:       torch.device,
-    H_patches:    int,
-    W_patches:    int,
+    encoder:  torch.nn.Module,
+    tensors:  list[torch.Tensor],   # each [1, 3, N, H, W] float32
+    device:   torch.device,
 ) -> list[torch.Tensor]:
     """
-    Run one JEPA forward pass on a list of same-length episode tensors.
+    Run one JEPA forward pass on a list of same-length, same-resolution episode tensors.
+
+    H_patches and W_patches are derived from the input tensor shape so that
+    different cameras (potentially at different resolutions) are handled correctly
+    without any external bookkeeping.
 
     Returns a list of cpu bfloat16 tensors, each [T_jepa, H_patches, W_patches, D].
     """
-    batch  = torch.cat(tensors, dim=0).to(device)  # [B, 3, N, H, W]
-    N      = batch.shape[2]
-    T_jepa = N // 2
+    batch     = torch.cat(tensors, dim=0).to(device)  # [B, 3, N, H, W]
+    N         = batch.shape[2]
+    H_patches = batch.shape[3] // 16
+    W_patches = batch.shape[4] // 16
+    T_jepa    = N // 2
 
     # [B, T_jepa*H_patches*W_patches, D]
     feats = encoder(batch)
@@ -280,15 +311,12 @@ class EpisodeBatchAccumulator:
     where cam_data = {cam_key: (video_tensor [1,3,N,H,W], frame_ids int64[N])}
     """
 
-    def __init__(self, encoder, device, jepa_dir, camera_keys,
-                 batch_size, H_patches, W_patches):
+    def __init__(self, encoder, device, jepa_dir, camera_keys, batch_size):
         self.encoder      = encoder
         self.device       = device
         self.jepa_dir     = jepa_dir
         self.camera_keys  = camera_keys
         self.batch_size   = batch_size
-        self.H_patches    = H_patches
-        self.W_patches    = W_patches
         # frame_count → list of (chunk_str, ep_id, cam_data)
         self._buckets: dict[int, list] = defaultdict(list)
 
@@ -323,7 +351,6 @@ class EpisodeBatchAccumulator:
                 continue
             features_by_cam[cam_key] = encode_batch(
                 self.encoder, tensors, self.device,
-                self.H_patches, self.W_patches,
             )
 
         # Save one file per episode.
@@ -400,23 +427,22 @@ def find_dataset_roots(root: Path, max_depth: int = 4) -> list[Path]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def process_dataset(
-    dataset_root:  Path,
-    encoder:       torch.nn.Module,
-    device:        torch.device,
-    rank:          int,
-    local_rank:    int,
-    world_size:    int,
-    H_patches:     int,
-    W_patches:     int,
-    target_fps:    float,
-    height:        int,
-    width:         int,
-    batch_size:    int,
-    chunk_ids:     list[str] | None,
-    camera_keys:   list[str] | None,
-    skip_existing: bool,
-    ds_index:      int,
-    ds_total:      int,
+    dataset_root:    Path,
+    encoder:         torch.nn.Module,
+    device:          torch.device,
+    rank:            int,
+    local_rank:      int,
+    world_size:      int,
+    cam_resolutions: dict[str, tuple[int, int]],
+    default_height:  int,
+    default_width:   int,
+    target_fps:      float,
+    batch_size:      int,
+    chunk_ids:       list[str] | None,
+    camera_keys:     list[str] | None,
+    skip_existing:   bool,
+    ds_index:        int,
+    ds_total:        int,
 ) -> tuple[int, int, int]:
     """
     Extract JEPA features for one dataset root.  Returns (processed, skipped, errors).
@@ -485,8 +511,6 @@ def process_dataset(
         jepa_dir    = jepa_dir,
         camera_keys = cam_keys,
         batch_size  = batch_size,
-        H_patches   = H_patches,
-        W_patches   = W_patches,
     )
 
     pbar = tqdm(
@@ -518,7 +542,10 @@ def process_dataset(
                 episode_ok = False
                 break
 
-            frames, fids = read_frames(str(mp4_path), target_fps, height, width)
+            h, w = cam_resolutions.get(
+                cam_key, _DEFAULT_CAM_RESOLUTIONS.get(cam_key, (default_height, default_width))
+            )
+            frames, fids = read_frames(str(mp4_path), target_fps, h, w)
 
             if len(frames) < 2:
                 tqdm.write(f'[Rank {rank}] Too few frames ({len(frames)}): {mp4_path}')
@@ -563,15 +590,25 @@ def main() -> None:
     parser.add_argument('--dataset-root',  required=True,
                         help='Single dataset root (contains videos/) OR a parent '
                              'directory whose subtree contains multiple such roots.')
-    parser.add_argument('--checkpoint',    default='/liujinxin/weights/vjepa2.1/vjepa2_1_vitG_384.pt',
+    parser.add_argument('--checkpoint',    default="/liujinxin/weights/vjepa2.1/vjepa2_1_vitG_384.pt",
                         help='Path to vjepa2.1 .pt checkpoint file')
     parser.add_argument('--camera-keys',   nargs='+', default=None,
                         help='Camera sub-directory names under videos/chunk-NNN/. '
                              'Auto-detected per dataset when omitted.')
-    parser.add_argument('--target-fps',    type=float, default=10.0,
+    parser.add_argument('--target-fps',    type=float, default=12.5,
                         help='Frame sampling rate — MUST match VAE latent extraction')
-    parser.add_argument('--height',        type=int,   default=256)
-    parser.add_argument('--width',         type=int,   default=256)
+    parser.add_argument('--height',        type=int,   default=256,
+                        help='Default extraction height for cameras not listed in '
+                             '--cam-resolutions or _DEFAULT_CAM_RESOLUTIONS.')
+    parser.add_argument('--width',         type=int,   default=256,
+                        help='Default extraction width (same fallback as --height).')
+    parser.add_argument('--cam-resolutions', nargs='*', default=None,
+                        metavar='CAM_KEY:HxW',
+                        help='Per-camera resolution overrides in CAM_KEY:HxW format, '
+                             'e.g. observation.images.cam_high:256x320 '
+                             'observation.images.cam_left_wrist:128x160. '
+                             'Overrides _DEFAULT_CAM_RESOLUTIONS for listed cameras. '
+                             'Cameras absent from both use --height/--width.')
     parser.add_argument('--batch-size',    type=int,   default=1,
                         help='Episodes per JEPA forward pass (same frame-count only)')
     parser.add_argument('--chunk-ids',     nargs='+',  default=None,
@@ -583,6 +620,21 @@ def main() -> None:
     parser.add_argument('--local-rank',    type=int,   default=0,
                         help='Overridden automatically by torchrun')
     args = parser.parse_args()
+
+    # ── parse per-camera resolutions ─────────────────────────────────────────
+    cli_cam_resolutions: dict[str, tuple[int, int]] = {}
+    if args.cam_resolutions:
+        for spec in args.cam_resolutions:
+            try:
+                cam_key, res = spec.rsplit(':', 1)
+                h_str, w_str = res.lower().split('x')
+                cli_cam_resolutions[cam_key] = (int(h_str), int(w_str))
+            except (ValueError, AttributeError):
+                raise ValueError(
+                    f'Invalid --cam-resolutions entry {spec!r}. '
+                    f'Expected format: cam_key:HxW  '
+                    f'(e.g. observation.images.cam_high:256x320)'
+                )
 
     # ── distributed setup ─────────────────────────────────────────────────────
     rank       = int(os.environ.get('RANK',       args.local_rank))
@@ -606,8 +658,14 @@ def main() -> None:
         print(f'  datasets : {len(datasets)} found')
         for ds in datasets:
             print(f'    {ds}')
-        print(f'  fps={args.target_fps}  res={args.height}×{args.width}  '
+        print(f'  fps={args.target_fps}  default_res={args.height}×{args.width}  '
               f'batch_size={args.batch_size}  skip_existing={args.skip_existing}')
+        _eff = {**_DEFAULT_CAM_RESOLUTIONS, **cli_cam_resolutions}
+        if _eff:
+            print('  per-camera resolutions (defaults + CLI overrides):')
+            for _k, (_h, _w) in sorted(_eff.items()):
+                _src = 'cli' if _k in cli_cam_resolutions else 'default'
+                print(f'    [{_src}] {_k}: {_h}×{_w}')
 
     # ── load model once ───────────────────────────────────────────────────────
     if rank == 0:
@@ -617,9 +675,6 @@ def main() -> None:
         n_params = sum(p.numel() for p in encoder.parameters()) / 1e9
         print(f'  Loaded. Parameters: {n_params:.2f}B\n')
 
-    H_patches = args.height // 16
-    W_patches = args.width  // 16
-
     # ── iterate over datasets ─────────────────────────────────────────────────
     total_processed = total_skipped = total_errors = 0
 
@@ -628,23 +683,22 @@ def main() -> None:
             print(f'── Dataset [{ds_idx}/{len(datasets)}]: {dataset_root}')
 
         processed, skipped, errors = process_dataset(
-            dataset_root  = dataset_root,
-            encoder       = encoder,
-            device        = device,
-            rank          = rank,
-            local_rank    = local_rank,
-            world_size    = world_size,
-            H_patches     = H_patches,
-            W_patches     = W_patches,
-            target_fps    = args.target_fps,
-            height        = args.height,
-            width         = args.width,
-            batch_size    = args.batch_size,
-            chunk_ids     = args.chunk_ids,
-            camera_keys   = args.camera_keys,
-            skip_existing = args.skip_existing,
-            ds_index      = ds_idx,
-            ds_total      = len(datasets),
+            dataset_root    = dataset_root,
+            encoder         = encoder,
+            device          = device,
+            rank            = rank,
+            local_rank      = local_rank,
+            world_size      = world_size,
+            cam_resolutions = cli_cam_resolutions,
+            default_height  = args.height,
+            default_width   = args.width,
+            target_fps      = args.target_fps,
+            batch_size      = args.batch_size,
+            chunk_ids       = args.chunk_ids,
+            camera_keys     = args.camera_keys,
+            skip_existing   = args.skip_existing,
+            ds_index        = ds_idx,
+            ds_total        = len(datasets),
         )
 
         total_processed += processed

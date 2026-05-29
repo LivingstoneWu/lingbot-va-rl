@@ -41,7 +41,7 @@ from utils import (
 
 class VA_Server:
 
-    def __init__(self, job_config):
+    def __init__(self, job_config, robotwin_eval=False):
         self.cache_name = 'pos'
         self.job_config = job_config
         self.save_root = job_config.save_root
@@ -94,7 +94,6 @@ class VA_Server:
                          'transformer'),
             torch_dtype=self.dtype,
             torch_device=self.device,
-            attn_mode="flashattn",
         )
         shard_fn = shard_model
         self.transformer = _configure_model(model=self.transformer,
@@ -114,6 +113,8 @@ class VA_Server:
                 torch_device='cpu' if self.enable_offload else self.device,
             )
             self.streaming_vae_half = WanVAEStreamingWrapper(vae_half)
+        # robotwin eval need to return action (C, F, H)
+        self.robotwin_eval = robotwin_eval
 
     def _get_t5_prompt_embeds(
         self,
@@ -456,6 +457,21 @@ class VA_Server:
         # 取出真实用到的原始动作通道
         action = action[self.job_config.used_action_channel_ids]   # (C_used, F, H)
         # 通常这里是 (7, F, H)
+
+        # COMMENT: 现在暂时用env_type 判断返回动作维度，Robotwin需要三维
+        # Output shape depends on the downstream client.  The RoboTwin
+        # evaluation client (eval_polict_client_*.py) indexes the returned
+        # tensor as action[:, i, j] and inspects action.shape[0/1/2], i.e. it
+        # expects 3-D (C_used, F, H).  All other clients (ManipArena adapter
+        # wan_va_policy*.py, real-robot deployment) expect a flat time series
+        # (F*H, C_used).  Branching on env_type is a pragmatic short-term fix:
+        # currently each checkpoint is paired with exactly one client pipeline,
+        # so env_type reliably identifies the expected shape.  A cleaner long-
+        # term design would be a per-request flag in obs (e.g. obs['action_shape'])
+        # or a handshake field, decoupling wire format from training metadata.
+        if self.robotwin_eval:
+            # Keep the model-native 3-D layout for the RoboTwin eval client.
+            return action  # (C_used, F, H)
 
         # 变成时间序列格式: (C, F, H) -> (F, H, C) -> (F*H, C)
         action = np.transpose(action, (1, 2, 0))   # (F, H, C_used)
@@ -1006,7 +1022,7 @@ def run(args):
     config.rank = rank
     config.local_rank = local_rank
     config.world_size = world_size
-    model = VA_Server(config)
+    model = VA_Server(config, robotwin_eval=args.robotwin)
     if config.infer_mode == 'i2va':
         logger.info(f"******************************USE I2AV mode******************************")
         model.generate()
@@ -1049,6 +1065,10 @@ def main():
         type=str,
         default=None,
         help='eval model path'
+    )
+    parser.add_argument(
+        "--robotwin",
+        action='store_true',
     )
     args = parser.parse_args()
     run(args)
