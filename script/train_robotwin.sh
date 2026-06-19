@@ -30,6 +30,7 @@ fi
 # export PYTHONFAULTHANDLER=1             # dump Python stack trace on SIGSEGV/SIGABRT
 # export CUDA_LAUNCH_BLOCKING=1           # make CUDA errors synchronous (slows training)
 # NCCL_DEBUG=INFO
+# NCCL_DEBUG_SUBSYS=INIT,P2P
 # NCCL_ASYNC_ERROR_HANDLING=1
 
 
@@ -45,6 +46,7 @@ config_name=${CONFIG_NAME}
 ## cmd setting
 export TOKENIZERS_PARALLELISM=false
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" TORCHFT_LIGHTHOUSE=${torchft_lighthouse} \
+NCCL_BLOCKING_WAIT=0 \
  python -m torch.distributed.run \
      --nproc_per_node=${num_gpu} \
      --local-ranks-filter=${log_rank} \

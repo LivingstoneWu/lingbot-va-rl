@@ -4,8 +4,8 @@ set -x
 
 umask 007
 
-cd /liujinxin/code/lhc/wy/wms/lingbot-va
-source /liujinxin/conda3/bin/activate wy-lingbotva
+cd /luhongchao/wy/lingbot-va
+source /luhongchao/anaconda3/bin/activate lingbot
  
 NGPU=${NGPU:-"8"}
 MASTER_PORT=${MASTER_PORT:-"29504"}

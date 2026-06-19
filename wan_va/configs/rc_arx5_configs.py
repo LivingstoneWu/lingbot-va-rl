@@ -7,7 +7,7 @@ from .shared_config import va_shared_cfg
 rc_arx5_base_config = EasyDict(__name__='Config: RC UR5 arm base')
 rc_arx5_base_config.update(va_shared_cfg)
 
-rc_arx5_base_config.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
+rc_arx5_base_config.wan22_pretrained_model_name_or_path = "/luhongchao/shared/weights/lingbot-va-base"
 
 # COMMENT: the latent chunk size, extraction 501 chunk_size -> (501-1)/4 + 1 = 126 frames
 rc_arx5_base_config.max_latent_frames = 126
@@ -48,8 +48,32 @@ def inverse_ids(cfg):
 # COMMENT: inverse_used_action_channel_ids maps the 30 action dimensions to the indices of the used action channels. 
 # COMMENT: not used ones are mapped to len(used_ids), or action_dim + 1, facilitating later padding.
 rc_arx5_base_config.used_action_channel_ids =  list(range(14, 20)) + [28]
+rc_arx5_base_config.norm_stat = {
+    "q01": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.1285954, 0.74826431, 0.28706074, -1.4375906, -1.026741, -1.5409708, 0, 0, 0, 0, 0, 0, 0, 0, 0.00039041872, 0],
+    "q99": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.107233, 2.2024488, 2.1372166, 1.3506145, 0.71507549, 1.7362862, 0, 0, 0, 0, 0, 0, 0, 0, 0.087184839, 0],
+}
 
 rc_arx5_base_config.inverse_used_action_channel_ids = inverse_ids(rc_arx5_base_config)
+
+rc_arx5_base_config.dataset_path = '/luhongchao/shared/dataset/robochallenge_converted/robochallenge_v1/arx5'
+rc_arx5_base_config.empty_emb_path = '/luhongchao/shared/dataset/robochallenge_converted/robochallenge_v1/arrange_flowers/empty_emb.pt'
+rc_arx5_base_config.enable_wandb = False 
+rc_arx5_base_config.load_worker = 1
+rc_arx5_base_config.save_interval = 5000
+rc_arx5_base_config.gc_interval = 50
+rc_arx5_base_config.cfg_prob = 0.1
+rc_arx5_base_config.learning_rate = 3e-5
+rc_arx5_base_config.beta1 = 0.9
+rc_arx5_base_config.beta2 = 0.95
+rc_arx5_base_config.weight_decay = 1e-1
+rc_arx5_base_config.warmup_steps = 50
+rc_arx5_base_config.min_lr = 1e-6
+rc_arx5_base_config.batch_size = 1
+rc_arx5_base_config.gradient_accumulation_steps = 2  # effective batch size = 2*8=16
+rc_arx5_base_config.num_steps = 30000
+rc_arx5_base_config.save_root = "./checkpoints/rc_arx5_base_debug/bs16lr3e-5_1e-6"
+rc_arx5_base_config.frame_chunk_size = 2
+
 
 
 

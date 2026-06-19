@@ -86,15 +86,20 @@ va_robotwin_jepatrain10_cfg.jepa_loss_t_max    = 1.0
 
 va_robotwin_jepatrain_full_cfg = EasyDict(__name__='Config: VA robotwin train')
 va_robotwin_jepatrain_full_cfg.update(va_robotwin_jepatrain10_cfg)
-va_robotwin_jepatrain_full_cfg.dataset_path = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robotwin/full"
-# va_robotwin_jepatrain_full_cfg.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
-va_robotwin_jepatrain_full_cfg.wan22_pretrained_model_name_or_path = "/liujinxin/code/lhc/wy/wms/lingbot-va/checkpoints/robotwin_full_jepa/bs32_lr1e-5_3e-6/checkpoints/checkpoint_step_28000"
-va_robotwin_jepatrain_full_cfg.learning_rate = 5.84e-6
-va_robotwin_jepatrain_full_cfg.min_lr = 3e-6
-va_robotwin_jepatrain_full_cfg.empty_emb_path = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robotwin/lingbot_posttrain_clean/empty_emb.pt"
-va_robotwin_jepatrain_full_cfg.save_interval = 1000
+va_robotwin_jepatrain_full_cfg.dataset_path = "/luhongchao/shared/dataset/robotwin_converted/full"
+va_robotwin_jepatrain_full_cfg.wan22_pretrained_model_name_or_path = "/luhongchao/shared/weights/lingbot-va-base"
+# va_robotwin_jepatrain_full_cfg.wan22_pretrained_model_name_or_path = "/liujinxin/code/lhc/wy/wms/lingbot-va/checkpoints/robotwin_full_jepa/bs32_lr1e-5_3e-6/checkpoints/checkpoint_step_28000"
+va_robotwin_jepatrain_full_cfg.learning_rate = 1e-5
+va_robotwin_jepatrain_full_cfg.min_lr = 1e-5
+va_robotwin_jepatrain_full_cfg.empty_emb_path = "/luhongchao/shared/dataset/robotwin_converted/empty_emb.pt"
+va_robotwin_jepatrain_full_cfg.save_interval = 5000
+va_robotwin_jepatrain_full_cfg.max_latent_frames = 68
+va_robotwin_jepatrain_full_cfg.batch_size = 1
 va_robotwin_jepatrain_full_cfg.gradient_accumulation_steps = 4
-# va_robotwin_jepatrain_full_cfg.num_steps = 50000
-va_robotwin_jepatrain_full_cfg.num_steps = 22000
-va_robotwin_jepatrain_full_cfg.save_root = './checkpoints/robotwin_full_jepa/bs32_lr1e-5_3e-6_resume28000'
+va_robotwin_jepatrain_full_cfg.num_steps = 50000
+# va_robotwin_jepatrain_full_cfg.num_steps = 22000
+va_robotwin_jepatrain_full_cfg.save_root = './checkpoints/robotwin_full_jepa/bs32_lr1e-5'
 
+va_robotwin_jepatrain_test_cfg = EasyDict(__name__='Config: VA robotwin train')
+va_robotwin_jepatrain_test_cfg.update(va_robotwin_jepatrain_full_cfg)
+va_robotwin_jepatrain_test_cfg.dataset_path = "/luhongchao/shared/dataset/robotwin_converted/lerobot_robotwin_eef_clean_50/adjust_bottle-demo_clean_collect_200-50"

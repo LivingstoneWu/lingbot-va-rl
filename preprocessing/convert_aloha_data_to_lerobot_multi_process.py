@@ -17,14 +17,14 @@ import lerobot.datasets.lerobot_dataset as lerobot_dataset_module
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # 配置常量
-HF_LEROBOT_HOME = Path("/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge")  # 请修改为实际路径
+HF_LEROBOT_HOME = Path("/luhongchao/shared/dataset/robochallenge_v2")  # 请修改为实际路径
 RAW_DATASET_NAMES = ["press_three_buttons"]  # 请修改为实际数据集名称, original dataset name
 PUSH_TO_HUB = False
 PROCESS_BATCH_SIZE=8
 NUM_WORKERS=4
 PREFETCH_QUEUE_SIZE=32
 IMAGE_WRITER_PROCESSES=0
-DATA_DIR = "/liujinxin/dataset/robochallenge/"
+DATA_DIR = "/luhongchao/shared/dataset/robochallenge_v2_raw"
 
 class EpisodeStateFiles:
     """表示一个episode的左右状态文件和相关资源"""
@@ -285,8 +285,8 @@ def find_all_episode_state_files(base_dir: str) -> List[EpisodeStateFiles]:
         # 2. 检查videos目录和特定视频文件
         if os.path.exists(episode.videos_dir):
             cam_high_path = os.path.join(episode.videos_dir, "cam_high_rgb.mp4")
-            cam_wrist_left_path = os.path.join(episode.videos_dir, "cam_wrist_left_rgb.mp4")
-            cam_wrist_right_path = os.path.join(episode.videos_dir, "cam_wrist_right_rgb.mp4")
+            cam_wrist_left_path = os.path.join(episode.videos_dir, "cam_left_wrist_rgb.mp4")
+            cam_wrist_right_path = os.path.join(episode.videos_dir, "cam_right_wrist_rgb.mp4")
             
             if os.path.exists(cam_high_path):
                 episode.cam_high_video = cam_high_path

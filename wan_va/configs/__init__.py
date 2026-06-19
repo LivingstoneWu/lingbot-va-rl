@@ -42,4 +42,5 @@ VA_CONFIGS = {
     'va_robotwin_jepatrain10_cfg': va_robotwin_jepatrain10_cfg,
     'rc_aloha_base_config': rc_aloha_base_config,
     'va_robotwin_jepatrain_full_cfg': va_robotwin_jepatrain_full_cfg,
+    'va_robotwin_jepatrain_test_cfg': va_robotwin_jepatrain_test_cfg,
 }

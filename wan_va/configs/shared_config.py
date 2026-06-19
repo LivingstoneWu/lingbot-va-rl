@@ -21,7 +21,7 @@ va_shared_cfg.log_freq = 10  # log metrics to log.jsonl every N optimizer steps
 # All dataset samples are padded to this length along the F dimension so that
 # the default PyTorch collate can stack them into batches of size > 1.
 # Set to (chunk_size - 1) // 4 + 1 where chunk_size is the extraction chunk_size.
-va_shared_cfg.max_latent_frames = 3
+va_shared_cfg.max_latent_frames = 126
 
 # ── JEPA auxiliary cosine loss ────────────────────────────────────────────────
 va_shared_cfg.jepa_loss_enabled  = False
@@ -50,4 +50,4 @@ va_shared_cfg.jepa_loss_t_max    = 1.0
 # block cosine similarities and gradient magnitudes, and append one record to
 # checkpoints/grad_stats.jsonl.  Set to 0 to disable (default).
 # Step 0 (before the first weight update) is always logged when enabled.
-va_shared_cfg.grad_log_freq = 0
+va_shared_cfg.grad_log_freq = 100

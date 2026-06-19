@@ -379,6 +379,18 @@ class Trainer:
 
         # Frame-wise action loss calculation
         action_loss = F.mse_loss(action_pred.float(), input_dict['action_dict']['targets'].float().detach(), reduction='none')
+        # COMMENT: DEBUG
+        with torch.no_grad():
+            raw = F.mse_loss(action_pred.float(), 
+                         input_dict['action_dict']['targets'].float(),
+                         reduction='none')
+            msk = input_dict['action_dict']['actions_mask'].float()
+            # Per-element loss for ONLY the 7 active channels
+            active_raw = (raw * msk).sum() / (msk.sum() + 1e-6)
+            wt = action_loss_weight[:, None, :, None, None]
+            active_weighted = (raw * wt * msk).sum() / (msk.sum() + 1e-6)
+            logger.info(f"[RAW MSE] active-only raw={active_raw:.4f}  weighted={active_weighted:.4f}  ratio={active_weighted/active_raw:.4f}")
+
         action_loss = action_loss * action_loss_weight[:, None, :, None, None]
         action_loss = action_loss * input_dict['action_dict']['actions_mask'].float()
         # Permute to (B, F, H, W, C) and flatten to (B*F, H*W*C)
@@ -476,6 +488,24 @@ class Trainer:
             if getattr(self.config, 'jepa_loss_enabled', False)
             else -1
         )
+
+        # ── PROFILER START (temporary – remove after debugging) ───────────────
+        # _do_profile = (
+        #     self.config.rank == 0
+        #     and not getattr(self, '_profiler_done', False)
+        # )
+        # if _do_profile:
+        #     _prof = torch.profiler.profile(
+        #         activities=[
+        #             torch.profiler.ProfilerActivity.CPU,
+        #             torch.profiler.ProfilerActivity.CUDA,
+        #         ],
+        #         with_stack=False,
+        #         record_shapes=False,
+        #     )
+        #     _prof.__enter__()
+        # ── PROFILER START END ────────────────────────────────────────────────
+
         latent_pred, action_pred, jepa_hidden = self.transformer(
             input_dict, train_mode=True, jepa_capture_layer=jepa_layer
         )
@@ -502,6 +532,19 @@ class Trainer:
                 if p.grad is not None:
                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
 
+        # ── PROFILER END (temporary – remove after debugging) ─────────────────
+        # if _do_profile:
+        #     torch.cuda.synchronize()
+        #     _prof.__exit__(None, None, None)
+        #     logger.info(
+        #         "\n[PROFILER] Top 20 ops by CUDA time:\n" +
+        #         _prof.key_averages().table(
+        #             sort_by="cuda_time_total", row_limit=20
+        #         )
+        #     )
+        #     self._profiler_done = True   # only profile once
+        # ── PROFILER END END ──────────────────────────────────────────────────
+
         losses = {
             'latent_loss': latent_loss.detach(),
             'action_loss': action_loss.detach(),
@@ -523,7 +566,7 @@ class Trainer:
                 )
             self.optimizer.step()
             self.lr_scheduler.step()
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
             losses['total_norm'] = total_norm
             losses['should_log'] = True
@@ -543,35 +586,21 @@ class Trainer:
 
     def _snapshot_block_grads(self) -> dict:
         """
-        Collect this rank's gradient shards grouped by transformer block index.
-        Parameter names are expected to contain 'blocks.N.' somewhere (works with
-        and without FSDP wrapper prefixes).  Non-block parameters (embeddings,
-        final norms, …) are grouped under block_id -1.
+        Copy this rank's gradient shards to CPU (bfloat16) keyed by parameter name.
+        Every tensor is flattened to 1-D.  Params with grad=None are stored as a
+        sentinel (None) so that _write_grad_stats can canonicalise sizes correctly.
 
-        IMPORTANT: we iterate ALL parameters (not just those with a non-None grad)
-        and substitute a zero tensor for missing grads.  Different loss terms
-        backprop through different heads, so some params will have grad=None for
-        some terms.  Keeping a consistent parameter ordering ensures every block's
-        flat tensor has the same length across terms so dot-products are valid.
-
-        Returns {block_id (int): flat float32 gradient tensor (local shard)}.
+        Returns {param_name (str): cpu bfloat16 1-D tensor, or None}.
         """
-        accum: dict = {}
+        snap: dict = {}
         for name, param in self.transformer.named_parameters():
-            # Get local shard of gradient, or zeros if this param wasn't touched
-            # by the current loss term's backward pass.
             if param.grad is not None:
-                local_grad = self._local_tensor(param.grad).detach().float().flatten()
+                snap[name] = (self._local_tensor(param.grad)
+                              .detach().flatten()
+                              .to(device='cpu', dtype=torch.bfloat16))
             else:
-                local_param = self._local_tensor(param.data)
-                local_grad  = torch.zeros(
-                    local_param.numel(), dtype=torch.float32,
-                    device=local_param.device
-                )
-            m = re.search(r'blocks\.(\d+)\.', name)
-            block_id = int(m.group(1)) if m else -1
-            accum.setdefault(block_id, []).append(local_grad)
-        return {bid: torch.cat(shards) for bid, shards in accum.items()}
+                snap[name] = None   # resolved to zeros in _write_grad_stats
+        return snap
 
     def _write_grad_stats(
         self,
@@ -583,44 +612,102 @@ class Trainer:
         Compute per-block pairwise cosine similarities and gradient magnitudes
         via a single all-reduce, then write one JSON record to grad_stats.jsonl.
 
-        Each rank contributes its local shard dot-products and squared norms;
-        the all-reduce sums them to recover global statistics without ever
-        materialising the full gradient tensors.  Only rank 0 writes the file.
+        block_grads_per_term: {term: {param_name: cpu bfloat16 1-D tensor}}
+
+        Statistics are accumulated on CPU as scalar running sums (one param at a
+        time), so no large GPU or CPU buffers are allocated.  A single small
+        scalar tensor is all-reduced to recover global statistics across ranks.
+        Only rank 0 writes the file.
         """
-        terms    = list(block_grads_per_term.keys())
-        all_bids = sorted({
-            bid
-            for grads in block_grads_per_term.values()
-            for bid in grads
-        })
-        if len(terms) < 2 or not all_bids:
+        terms = list(block_grads_per_term.keys())
+        if len(terms) < 2:
             return
 
         pairs = [(ta, tb) for i, ta in enumerate(terms) for tb in terms[i + 1:]]
 
-        # Build a flat scalar tensor for a single all-reduce:
-        #   per block: [sq_term0, sq_term1, …, dot_pair0, dot_pair1, …]
+        # Discover all block ids from parameter names (same set for every term).
+        param_names = list(next(iter(block_grads_per_term.values())).keys())
+        bid_for: dict = {}
+        for name in param_names:
+            m = re.search(r'blocks\.(\d+)\.', name)
+            bid_for[name] = int(m.group(1)) if m else -1
+        all_bids = sorted(set(bid_for.values()))
+
+        if not all_bids:
+            return
+
+        # ── Canonicalise per-param sizes and accumulate stats on CPU ─────────
+        # Rule: the canonical numel for a param is the numel of the FIRST term
+        # whose snapshot is not None (i.e. the first term that actually produced
+        # a gradient for this param).  None-grad terms get zero tensors of that
+        # canonical size.  If two non-None snapshots have DIFFERENT numels (an
+        # FSDP2 sharding-state inconsistency across backward passes), the param
+        # is skipped entirely for that step — better to omit than to corrupt.
+        sq_accum:  dict = {term: {bid: 0.0 for bid in all_bids}
+                           for term in terms}
+        dot_accum: dict = {(ta, tb): {bid: 0.0 for bid in all_bids}
+                           for ta, tb in pairs}
+        n_skipped = 0
+
+        for name in param_names:
+            bid = bid_for[name]
+
+            # Determine canonical numel from the first non-None snapshot.
+            canon_n = None
+            for term in terms:
+                t = block_grads_per_term[term].get(name)
+                if t is not None:
+                    canon_n = t.numel()
+                    break
+            if canon_n is None:
+                # All terms have grad=None for this param; nothing to contribute.
+                continue
+
+            # Resolve snapshots: zeros for None-grad terms; check non-None sizes.
+            gs: dict = {}
+            skip = False
+            for term in terms:
+                t = block_grads_per_term[term].get(name)
+                if t is None:
+                    gs[term] = torch.zeros(canon_n, dtype=torch.float32)
+                elif t.numel() != canon_n:
+                    # Two non-None snapshots disagree on size: FSDP2 state mismatch.
+                    # Skip this param to avoid producing incorrect statistics.
+                    n_skipped += 1
+                    skip = True
+                    break
+                else:
+                    gs[term] = t.float()
+            if skip:
+                continue
+
+            for term in terms:
+                sq_accum[term][bid] += gs[term].pow(2).sum().item()
+            for ta, tb in pairs:
+                dot_accum[(ta, tb)][bid] += (gs[ta] * gs[tb]).sum().item()
+
+        if n_skipped:
+            logger.warning(
+                f"_write_grad_stats step {self.step}: skipped {n_skipped} params "
+                "due to FSDP2 grad/data numel mismatch across terms. "
+                "Statistics for affected blocks may be underestimated."
+            )
+
+        # ── Build flat scalar tensor → single all-reduce ──────────────────────
         scalars: list = []
-        idx: dict = {}   # (bid, key) -> position
+        idx: dict = {}
 
         for bid in all_bids:
             for term in terms:
-                g  = block_grads_per_term[term].get(bid)
-                sq = (g * g).sum() if g is not None else torch.zeros(
-                    1, device=self.device
-                ).squeeze()
                 idx[(bid, f'sq_{term}')] = len(scalars)
-                scalars.append(sq)
-            for (ta, tb) in pairs:
-                ga  = block_grads_per_term[ta].get(bid)
-                gb  = block_grads_per_term[tb].get(bid)
-                dot = (
-                    (ga * gb).sum()
-                    if (ga is not None and gb is not None)
-                    else torch.zeros(1, device=self.device).squeeze()
-                )
+                scalars.append(torch.tensor(
+                    sq_accum[term][bid], dtype=torch.float32, device=self.device
+                ))
+            for ta, tb in pairs:
                 idx[(bid, f'dot_{ta}_{tb}')] = len(scalars)
-                scalars.append(dot)
+                scalars.append(torch.tensor(
+                    dot_accum[(ta, tb)][bid], dtype=torch.float32, device=self.device
+                ))
 
         stats = torch.stack(scalars)
         if dist.is_initialized():
@@ -706,7 +793,7 @@ class Trainer:
         block_grads_per_term: dict = {}
 
         for term in active_terms:
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
             for i, (input_dict, batch) in enumerate(prepared):
                 enable_sync   = (i == K - 1)
@@ -752,7 +839,12 @@ class Trainer:
         self._write_grad_stats(block_grads_per_term, mean_t_latent, mean_t_action)
 
         # ── 4. Regular combined backward (the actual update) ──────────────
-        self.optimizer.zero_grad()
+        # Free per-term grad snapshots (CPU) and flush any unreferenced GPU
+        # memory before the most memory-intensive pass.
+        del block_grads_per_term
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.optimizer.zero_grad(set_to_none=True)
         micro_latent_losses: list = []
         micro_action_losses: list = []
         micro_jepa_losses:   list = []
@@ -807,7 +899,7 @@ class Trainer:
             )
         self.optimizer.step()
         self.lr_scheduler.step()
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
         return {
             'micro_latent_losses': micro_latent_losses,

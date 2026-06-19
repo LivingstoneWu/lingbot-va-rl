@@ -7,7 +7,7 @@ from .shared_config import va_shared_cfg
 rc_aloha_base_config = EasyDict(__name__='Config: RC ALOHA base')
 rc_aloha_base_config.update(va_shared_cfg)
 
-rc_aloha_base_config.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
+rc_aloha_base_config.wan22_pretrained_model_name_or_path = "/luhongchao/shared/weights/lingbot-va-base"
 
 # COMMENT: the latent chunk size, extraction 501 chunk_size -> (501-1)/4 + 1 = 126 frames
 rc_aloha_base_config.max_latent_frames = 126
@@ -48,15 +48,15 @@ for i, j in enumerate(rc_aloha_base_config.used_action_channel_ids):
     inverse_used_action_channel_ids[j] = i
 rc_aloha_base_config.inverse_used_action_channel_ids = inverse_used_action_channel_ids
 rc_aloha_base_config.norm_stat = {
-    "q01": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -0.67454201, -0.0056518558, -1.7365725, -1.1733184, -0.15912417, -1.0788068, 0, -0.18659846, -0.00047098799, -2.695848, -1.5094293, -0.90754157, -1.5381073, 0, -0.0019, -0.0033],
-    "q99": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.81529766, 2.1013391, 0.01500184, 0.97998649, 1.217975, 1.9412904, 0, 1.0687242, 2.5955625, 0.0083731199, 1.7378759, 1.2178005, 1.00924, 0, 0.081100002, 0.092],
+    "q01": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -0.67796105, -0.002511936, -1.7501565, -1.19303, -0.15675178, -1.1812903, 0, -0.1992977, -0.00047098799, -2.7152457, -1.535822, -0.9342832, -1.549569, 0, -0.0019, -0.0033],
+    "q99": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.82937497, 2.1029963, 0.01500184, 1.0358771, 1.2182541, 1.961979, 0, 1.0841097, 2.6075118, 0.0084254518, 1.7383819, 1.2186029, 1.0488728, 0, 0.082900003, 0.093900003],
 }
 
-rc_aloha_base_config.dataset_path = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/rc_aloha'
-rc_aloha_base_config.empty_emb_path = '/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/rc_aloha/put_pen_into_pencil_case_trim/empty_emb.pt'
+rc_aloha_base_config.dataset_path = '/luhongchao/shared/dataset/robochallenge_converted/robochallenge_v1/aloha'
+rc_aloha_base_config.empty_emb_path = '/luhongchao/shared/dataset/robochallenge_converted/robochallenge_v1/arrange_fruits_in_basket/empty_emb.pt'
 rc_aloha_base_config.enable_wandb = False 
 rc_aloha_base_config.load_worker = 2
-rc_aloha_base_config.save_interval = 500
+rc_aloha_base_config.save_interval = 5000
 rc_aloha_base_config.gc_interval = 50
 rc_aloha_base_config.cfg_prob = 0.1
 
@@ -69,8 +69,8 @@ rc_aloha_base_config.warmup_steps = 50
 rc_aloha_base_config.batch_size = 1
 rc_aloha_base_config.min_lr = 1e-6
 rc_aloha_base_config.gradient_accumulation_steps = 2  # effective batch size = 2*8=16
-rc_aloha_base_config.num_steps = 15000
-rc_aloha_base_config.save_root = "./checkpoints/rc_aloha_base/bs16lr1e-5_1e-6"
+rc_aloha_base_config.num_steps = 30000
+rc_aloha_base_config.save_root = "./checkpoints/rc_aloha_base/bs16lr3e-5_1e-6"
 rc_aloha_base_config.infer_mode = 'server'
 rc_aloha_base_config.frame_chunk_size = 4
 rc_aloha_base_config.action_per_frame = 12

@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from wan_va.configs import VA_CONFIGS
 
 # DATASET_DIR = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/robochallenge/"
-DATASET_DIR = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/"
+DATASET_DIR = "/luhongchao/shared/dataset/"
 
 def parse_channel_ids(value: str) -> List[int]:
     # Accept formats like: "0,1,2" or "0 1 2"

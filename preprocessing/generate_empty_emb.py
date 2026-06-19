@@ -1,5 +1,5 @@
 import torch, glob, os
-dataset_root = "/liujinxin/code/lhc/wy/wms/lingbot-va/datasets/maniparena/multi_datasets/final/arrange_cup_inverted_triangle"
+dataset_root = "/luhongchao/shared/dataset/robotwin_converted/lerobot_robotwin_eef_clean_50/adjust_bottle-demo_clean_collect_200-50"
 pths = glob.glob(os.path.join(dataset_root, "latents", "chunk-*", "observation.images.*", "episode_*.pth"))
 assert pths, "No latent pth found"
 sample = torch.load(pths[0], weights_only=False)
