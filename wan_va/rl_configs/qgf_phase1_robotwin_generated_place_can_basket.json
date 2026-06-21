@@ -1,0 +1,26 @@
+{
+  "base_config_name": "robotwin_qgf_v1_cfg_place_can_basket_generated",
+  "output_dir": "./checkpoints/phase1_critic_mc",
+  "transformer_path": null,
+  "algorithm": "mc",
+  "critic_type": "twin_mlp_v1",
+  "infer_latent_chunk_size": 2,
+  "feature_dim": 3072,
+  "hidden_dim": 512,
+  "num_layers": 2,
+  "gamma": 0.99,
+  "expectile": 0.7,
+  "value_loss_weight": 1.0,
+  "target_ema_rate": 0.005,
+  "learning_rate": 3e-4,
+  "weight_decay": 1e-4,
+  "batch_size": 8,
+  "num_workers": 4,
+  "num_steps": 10000,
+  "log_interval": 10,
+  "save_interval": 1000,
+  "window_size": 64,
+  "seed": 42,
+  "resume_from": null
+}
+

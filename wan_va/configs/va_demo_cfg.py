@@ -8,7 +8,7 @@ va_demo_cfg = EasyDict(__name__='Config: VA demo')
 va_demo_cfg.update(va_shared_cfg)
 va_shared_cfg.infer_mode = 'server'
 
-va_demo_cfg.wan22_pretrained_model_name_or_path = "/liujinxin/weights/lingbot-va-base"
+va_demo_cfg.wan22_pretrained_model_name_or_path = "/luhongchao/shared/weights/lingbot-va-base"
 
 va_demo_cfg.attn_window = 30
 va_demo_cfg.frame_chunk_size = 4

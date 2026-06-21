@@ -40,13 +40,13 @@ These may be added only after Phase 1 is stable and evaluated.
 
 LingBot-VA generates autoregressive chunks:
 
-\[
+$$
 \text{history / language / observations}
 \rightarrow
 \text{video chunk}
 \rightarrow
 \text{action chunk}.
-\]
+$$
 
 The released model uses a unified transformer with modality-specific video/action input and output adapters. The action branch receives contextual information through the transformer, including history, language, and generated visual context.
 
@@ -58,49 +58,49 @@ For this phase, the action branch is treated as the control policy. The video br
 
 One inference-sized latent video chunk and all of its aligned actions are treated as one RL action. Define:
 
-\[
+$$
 K = \texttt{infer\_latent\_chunk\_size},
 \qquad
 N = \texttt{action\_per\_frame}.
-\]
+$$
 
-The action tensor for transition \(t\) is:
+The action tensor for transition $t$ is:
 
-\[
+$$
 A_t \in \mathbb{R}^{C_{\mathrm{action}} \times K \times N \times 1}.
-\]
+$$
 
-Thus one RL action contains \(K\) latent frames and \(K N\) aligned action tokens. An `action_config` entry is only a longer precomputed storage clip and may yield several such RL transitions.
+Thus one RL action contains $K$ latent frames and $K N$ aligned action tokens. An `action_config` entry is only a longer precomputed storage clip and may yield several such RL transitions.
 
-The effective state includes all conditioning information available at chunk \(t\), and the critic estimates \(Q(s_t,A_t)\). The offline dataset is:
+The effective state includes all conditioning information available at chunk $t$, and the critic estimates $Q(s_t,A_t)$. The offline dataset is:
 
-\[
+$$
 \mathcal{D}
 =
 \{(s_t,A_t,r_t,s_{t+1},d_t)\}.
-\]
+$$
 
-Let \(Z_t\) denote the current generated video chunk paired with action chunk \(A_t\). The IQL state alignment is:
+Let $Z_t$ denote the current generated video chunk paired with action chunk $A_t$. The IQL state alignment is:
 
-\[
+$$
 s_t \leftarrow Z_{t-1},
 \qquad
 s_{t+1} \leftarrow Z_t.
-\]
+$$
 
-The action-branch hidden state for \(Q(s_t,A_t)\) may use the current action/video chunk \((A_t,Z_t)\). The state-only value function must not use \(Z_t\) for \(V(s_t)\), because \(Z_t\) already encodes information about the current action outcome.
+The action-branch hidden state for $Q(s_t,A_t)$ may use the current action/video chunk $(A_t,Z_t)$. The state-only value function must not use $Z_t$ for $V(s_t)$, because $Z_t$ already encodes information about the current action outcome.
 
 For Phase 1:
 
-\[
+$$
 r_t =
 \begin{cases}
 1, & \text{if this RL chunk reaches successful episode termination}, \\
 0, & \text{otherwise}.
 \end{cases}
-\]
+$$
 
-The discount is \(\Gamma_t=\gamma^{H_t}\), where \(H_t\) is the number of valid environment actions represented by the chunk. The training `infer_latent_chunk_size` must match inference `frame_chunk_size`.
+The discount is $\Gamma_t=\gamma^{H_t}$, where $H_t$ is the number of valid environment actions represented by the chunk. The training `infer_latent_chunk_size` must match inference `frame_chunk_size`.
 
 ---
 
@@ -119,48 +119,48 @@ The backbone provides contextualized action-token hidden states.
 
 ### Critic Input
 
-Given a clean dataset action chunk \(A_t\), run the frozen action branch at the clean endpoint using attention `chunk_size=K`, matching inference. Preserve:
+Given a clean dataset action chunk $A_t$, run the frozen action branch at the clean endpoint using attention `chunk_size=K`, matching inference. Preserve:
 
-\[
+$$
 H_{\mathrm{act}}^L
 \in
 \mathbb{R}^{B \times K \times N \times d}.
-\]
+$$
 
 The critic requires one scalar per RL chunk. Masked-mean pool all valid action hidden states across both the latent-frame and action-per-frame axes:
 
-\[
+$$
 h_Q
 =
 \frac{\sum_{f=1}^{K}\sum_{i=1}^{N}m_{f,i}H_{\mathrm{act},f,i}^L}
 {\sum_{f=1}^{K}\sum_{i=1}^{N}m_{f,i}}.
-\]
+$$
 
-This produces \(h_Q \in \mathbb{R}^{B \times d}\), followed by one Q value per batch item. The same K, attention grouping, masks, and pooling must be used during training and guided inference.
+This produces $h_Q \in \mathbb{R}^{B \times d}$, followed by one Q value per batch item. The same K, attention grouping, masks, and pooling must be used during training and guided inference.
 
 ### Double-Q Heads
 
 Use two independent MLP heads:
 
-\[
+$$
 Q_{\psi_1}(s_t,A_t)
 =
 \mathrm{MLP}_{\psi_1}(\mathrm{LN}(h_Q)),
-\]
+$$
 
-\[
+$$
 Q_{\psi_2}(s_t,A_t)
 =
 \mathrm{MLP}_{\psi_2}(\mathrm{LN}(h_Q)).
-\]
+$$
 
 Define:
 
-\[
+$$
 Q_{\min}(s_t,A_t)
 =
 \min(Q_{\psi_1}(s_t,A_t), Q_{\psi_2}(s_t,A_t)).
-\]
+$$
 
 The double critic reduces overestimation, which is particularly important because critic gradients will later steer generated actions.
 
@@ -168,27 +168,27 @@ The double critic reduces overestimation, which is particularly important becaus
 
 IQL also requires a state-value function:
 
-\[
+$$
 V_\phi(s_t).
-\]
+$$
 
-For transition \(t\), extract final normalized video tokens from the previous latent chunk \(Z_{t-1}\):
+For transition $t$, extract final normalized video tokens from the previous latent chunk $Z_{t-1}$:
 
-\[
+$$
 h_{V,t}
 =
 \mathrm{MaskedMeanPool}(H_{\mathrm{video}}^L(Z_{t-1})),
-\]
+$$
 
 then:
 
-\[
+$$
 V_\phi(s_t)
 =
 \mathrm{MLP}_{\phi}(\mathrm{LN}(h_{V,t})).
-\]
+$$
 
-The first episode chunk has no predecessor; exclude it from the expectile value loss while retaining its Q loss. For the Bellman target, apply the EMA target value head to current video tokens \(Z_t\), which represent \(s_{t+1}\).
+The first episode chunk has no predecessor; exclude it from the expectile value loss while retaining its Q loss. For the Bellman target, apply the EMA target value head to current video tokens $Z_t$, which represent $s_{t+1}$.
 
 ---
 
@@ -198,7 +198,7 @@ The first episode chunk has no predecessor; exclude it from the expectile value 
 
 Fit the state-value function to an upper expectile of observed action values:
 
-\[
+$$
 L_V
 =
 \mathbb{E}_{(s,A)\sim\mathcal D}
@@ -208,41 +208,41 @@ L_V
 Q_{\min}(s,A)-V_\phi(s)
 \right)
 \right],
-\]
+$$
 
 where:
 
-\[
+$$
 \rho_\tau(u)
 =
 |\tau-\mathbf{1}[u<0]|u^2.
-\]
+$$
 
 Initial setting:
 
-\[
+$$
 \tau = 0.7.
-\]
+$$
 
 This may be increased after observing the action-quality distribution in the dataset.
 
 ### Critic Target
 
-Use an EMA target value network \(V_{\bar\phi}\):
+Use an EMA target value network $V_{\bar\phi}$:
 
-\[
+$$
 y_t
 =
 r_t
 +
 (1-d_t)\Gamma_t V_{\bar\phi}(s_{t+1}),
-\]
+$$
 
-where \(V_{\bar\phi}(s_{t+1})\) pools current video-chunk tokens \(Z_t\). It does not load \(Z_{t+1}\); doing so would shift the target one transition too far forward.
+where $V_{\bar\phi}(s_{t+1})$ pools current video-chunk tokens $Z_t$. It does not load $Z_{t+1}$; doing so would shift the target one transition too far forward.
 
 ### Double-Q Loss
 
-\[
+$$
 L_Q
 =
 \mathbb{E}_{\mathcal D}
@@ -252,24 +252,24 @@ L_Q
 Q_{\psi_i}(s_t,A_t)-y_t
 \right)^2
 \right].
-\]
+$$
 
 ### Total Loss
 
-\[
+$$
 L_{\mathrm{IQL}}
 =
 L_Q + \lambda_V L_V.
-\]
+$$
 
 Only critic and value-head parameters are updated:
 
-\[
+$$
 \nabla_{\theta_{\mathrm{LingBot}}}
 L_{\mathrm{IQL}}
 =
 0.
-\]
+$$
 
 No actor/policy extraction loss is used. The pretrained LingBot action flow remains the reference policy.
 
@@ -277,45 +277,45 @@ No actor/policy extraction loss is used. The pretrained LingBot action flow rema
 
 ## Test-Time Q-Guided Action Sampling
 
-At action flow time \(\tau\), LingBot samples:
+At action flow time $\tau$, LingBot samples:
 
-\[
+$$
 A_\tau \in \mathbb{R}^{B \times C_{\mathrm{action}} \times F \times N \times 1},
-\]
+$$
 
-where \(F=\texttt{frame\_chunk\_size}=K\). For this repository's scheduler:
+where $F=\texttt{frame\_chunk\_size}=K$. For this repository's scheduler:
 
-\[
+$$
 \hat A_{\mathrm{clean}}
 =
 A_\tau-\sigma_\tau v_\theta(A_\tau,\tau).
-\]
+$$
 
-Feed the complete clean chunk through the critic. Pooling across its valid \(F N\) hidden states produces one \(Q_{\min}\) per batch item, so no per-latent Q reduction is required.
+Feed the complete clean chunk through the critic. Pooling across its valid $F N$ hidden states produces one $Q_{\min}$ per batch item, so no per-latent Q reduction is required.
 
 Compute:
 
-\[
+$$
 g_\tau
 =
 \nabla_{\hat A_{\mathrm{clean}}}
 Q_{\min}(s_t,\hat A_{\mathrm{clean}}).
-\]
+$$
 
-Before adding \(g_\tau\) to the flow velocity, zero gradient entries for padded positions, invalid action channels, and server-clamped `action_cond` positions. These entries either do not represent an action or will be overwritten by the server.
+Before adding $g_\tau$ to the flow velocity, zero gradient entries for padded positions, invalid action channels, and server-clamped `action_cond` positions. These entries either do not represent an action or will be overwritten by the server.
 
 Normalize or clip the gradient:
 
-\[
+$$
 \tilde g_\tau
 =
 \frac{g_\tau}
 {\max(\|g_\tau\|_2,\epsilon)}.
-\]
+$$
 
 Then guide the action flow:
 
-\[
+$$
 A_{\tau+\Delta \tau}
 =
 A_\tau
@@ -326,7 +326,7 @@ v_\theta(s_t,A_\tau,\tau)
 +
 \lambda_{\mathrm{guide}}\tilde g_\tau
 \right].
-\]
+$$
 
 The base flow preserves behavior-policy plausibility. The Q-gradient provides a conservative local preference toward higher predicted return.
 
@@ -350,9 +350,9 @@ Parameter update to LingBot: no
 
 The action input must retain autograd so that:
 
-\[
+$$
 \nabla_{\hat A_{\mathrm{clean}}}Q
-\]
+$$
 
 can be computed. The frozen action DiT forward pass must not be wrapped in `torch.no_grad()` during guided inference.
 
@@ -429,9 +429,9 @@ Compare:
 
 Primary metric:
 
-\[
+$$
 \text{task success rate}.
-\]
+$$
 
 Secondary diagnostics:
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-06-21 - Critic Training Workflow
+
+### Added
+
+- `workflow.md`: documents dataset preflight, base/critic config ownership, per-rank loader settings, attention-window semantics, launch commands, monitoring, and checkpoint resume behavior.
+
+### Changed
+
+- `DESIGN.md`: uses `$...$` for inline equations and `$$...$$` for display equations.
+
 ## 2026-06-20 - IQL Value-State Alignment
 
 ### Changed
