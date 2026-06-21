@@ -56,58 +56,51 @@ For this phase, the action branch is treated as the control policy. The video br
 
 ## RL Formulation
 
-One action chunk is treated as one RL action:
+One inference-sized latent video chunk and all of its aligned actions are treated as one RL action. Define:
 
 \[
-A_t = [a_t, a_{t+1}, \ldots, a_{t+K-1}].
+K = \texttt{infer\_latent\_chunk\_size},
+\qquad
+N = \texttt{action\_per\_frame}.
 \]
 
-The effective state includes all conditioning information available at chunk \(t\):
+The action tensor for transition \(t\) is:
 
 \[
-s_t =
-(o_{\leq t}, a_{<t}, l, \text{video context/history}).
+A_t \in \mathbb{R}^{C_{\mathrm{action}} \times K \times N \times 1}.
 \]
 
-The critic estimates:
+Thus one RL action contains \(K\) latent frames and \(K N\) aligned action tokens. An `action_config` entry is only a longer precomputed storage clip and may yield several such RL transitions.
 
-\[
-Q(s_t, A_t).
-\]
-
-The language instruction is part of the state representation. Therefore, the initial implementation does not require an explicitly separate goal input:
-
-\[
-Q(s_t, A_t)
-\equiv
-Q(o_{\leq t}, a_{<t}, l, \text{video context}, A_t).
-\]
-
-The offline transition dataset is:
+The effective state includes all conditioning information available at chunk \(t\), and the critic estimates \(Q(s_t,A_t)\). The offline dataset is:
 
 \[
 \mathcal{D}
 =
-\{(s_t, A_t, r_t^{(K)}, s_{t+K}, d_t)\},
+\{(s_t,A_t,r_t,s_{t+1},d_t)\}.
 \]
 
-where \(d_t\) indicates terminal transition.
-
-For Phase 1, use sparse terminal success reward:
+Let \(Z_t\) denote the current generated video chunk paired with action chunk \(A_t\). The IQL state alignment is:
 
 \[
-r_t^{(K)} =
+s_t \leftarrow Z_{t-1},
+\qquad
+s_{t+1} \leftarrow Z_t.
+\]
+
+The action-branch hidden state for \(Q(s_t,A_t)\) may use the current action/video chunk \((A_t,Z_t)\). The state-only value function must not use \(Z_t\) for \(V(s_t)\), because \(Z_t\) already encodes information about the current action outcome.
+
+For Phase 1:
+
+\[
+r_t =
 \begin{cases}
-1, & \text{if the chunk reaches successful termination}, \\
+1, & \text{if this RL chunk reaches successful episode termination}, \\
 0, & \text{otherwise}.
 \end{cases}
 \]
 
-The chunk-level discount is:
-
-\[
-\Gamma = \gamma^K.
-\]
+The discount is \(\Gamma_t=\gamma^{H_t}\), where \(H_t\) is the number of valid environment actions represented by the chunk. The training `infer_latent_chunk_size` must match inference `frame_chunk_size`.
 
 ---
 
@@ -126,37 +119,24 @@ The backbone provides contextualized action-token hidden states.
 
 ### Critic Input
 
-Given a clean dataset action chunk \(A_t\), run the frozen action branch at the clean/data endpoint of the action flow schedule:
+Given a clean dataset action chunk \(A_t\), run the frozen action branch at the clean endpoint using attention `chunk_size=K`, matching inference. Preserve:
 
 \[
 H_{\mathrm{act}}^L
-=
-\mathrm{ActionDiT}_{\mathrm{frozen}}
-(s_t, A_t, \tau_{\mathrm{clean}}).
+\in
+\mathbb{R}^{B \times K \times N \times d}.
 \]
 
-Here:
-
-\[
-H_{\mathrm{act}}^L \in \mathbb{R}^{K \times d}
-\]
-
-contains the final-layer hidden states for the \(K\) action tokens.
-
-The exact numerical value of \(\tau_{\mathrm{clean}}\) must follow the repository’s flow-time convention. It should correspond to the data/clean-action endpoint, or the nearest timestep used during normal training.
-
-### Pooling
-
-The critic requires one scalar value per action chunk. Mean-pool the action-token hidden states:
+The critic requires one scalar per RL chunk. Masked-mean pool all valid action hidden states across both the latent-frame and action-per-frame axes:
 
 \[
 h_Q
 =
-\frac{1}{K}
-\sum_{i=1}^{K} H_{\mathrm{act},i}^L.
+\frac{\sum_{f=1}^{K}\sum_{i=1}^{N}m_{f,i}H_{\mathrm{act},f,i}^L}
+{\sum_{f=1}^{K}\sum_{i=1}^{N}m_{f,i}}.
 \]
 
-The transformer has already incorporated history, language, visual context, and the candidate action chunk before pooling. Mean pooling only reduces the action-token sequence into a single state-action representation.
+This produces \(h_Q \in \mathbb{R}^{B \times d}\), followed by one Q value per batch item. The same K, attention grouping, masks, and pooling must be used during training and guided inference.
 
 ### Double-Q Heads
 
@@ -192,12 +172,12 @@ IQL also requires a state-value function:
 V_\phi(s_t).
 \]
 
-Use a state-only representation extracted from the frozen transformer context/history tokens, excluding the current candidate action chunk. Let:
+For transition \(t\), extract final normalized video tokens from the previous latent chunk \(Z_{t-1}\):
 
 \[
-h_V
+h_{V,t}
 =
-\mathrm{MeanPool}(H_{\mathrm{context}}^L),
+\mathrm{MaskedMeanPool}(H_{\mathrm{video}}^L(Z_{t-1})),
 \]
 
 then:
@@ -205,10 +185,10 @@ then:
 \[
 V_\phi(s_t)
 =
-\mathrm{MLP}_{\phi}(\mathrm{LN}(h_V)).
+\mathrm{MLP}_{\phi}(\mathrm{LN}(h_{V,t})).
 \]
 
-If clean extraction of context-only hidden states is difficult in the initial codebase, implement a Monte-Carlo-return critic baseline first, then add the IQL value head once the representation path is verified.
+The first episode chunk has no predecessor; exclude it from the expectile value loss while retaining its Q loss. For the Bellman target, apply the EMA target value head to current video tokens \(Z_t\), which represent \(s_{t+1}\).
 
 ---
 
@@ -253,10 +233,12 @@ Use an EMA target value network \(V_{\bar\phi}\):
 \[
 y_t
 =
-r_t^{(K)}
+r_t
 +
-(1-d_t)\Gamma V_{\bar\phi}(s_{t+K}).
+(1-d_t)\Gamma_t V_{\bar\phi}(s_{t+1}),
 \]
+
+where \(V_{\bar\phi}(s_{t+1})\) pools current video-chunk tokens \(Z_t\). It does not load \(Z_{t+1}\); doing so would shift the target one transition too far forward.
 
 ### Double-Q Loss
 
@@ -295,36 +277,23 @@ No actor/policy extraction loss is used. The pretrained LingBot action flow rema
 
 ## Test-Time Q-Guided Action Sampling
 
-At action flow time \(\tau\), LingBot produces a reference velocity:
+At action flow time \(\tau\), LingBot samples:
 
 \[
-v_\theta(s_t,A_\tau,\tau).
+A_\tau \in \mathbb{R}^{B \times C_{\mathrm{action}} \times F \times N \times 1},
 \]
 
-Construct a local estimate of the clean action chunk:
+where \(F=\texttt{frame\_chunk\_size}=K\). For this repository's scheduler:
 
 \[
 \hat A_{\mathrm{clean}}
 =
-A_\tau
-+
-\alpha(\tau)
-v_\theta(s_t,A_\tau,\tau),
+A_\tau-\sigma_\tau v_\theta(A_\tau,\tau).
 \]
 
-where \(\alpha(\tau)\) follows the repository’s flow parameterization. For a linear interpolation convention with clean data at \(t=1\):
+Feed the complete clean chunk through the critic. Pooling across its valid \(F N\) hidden states produces one \(Q_{\min}\) per batch item, so no per-latent Q reduction is required.
 
-\[
-\alpha(\tau)=1-\tau.
-\]
-
-Feed \(\hat A_{\mathrm{clean}}\) through the frozen action branch at the clean endpoint and evaluate:
-
-\[
-Q_{\min}(s_t,\hat A_{\mathrm{clean}}).
-\]
-
-Compute the action gradient:
+Compute:
 
 \[
 g_\tau
@@ -332,6 +301,8 @@ g_\tau
 \nabla_{\hat A_{\mathrm{clean}}}
 Q_{\min}(s_t,\hat A_{\mathrm{clean}}).
 \]
+
+Before adding \(g_\tau\) to the flow velocity, zero gradient entries for padded positions, invalid action channels, and server-clamped `action_cond` positions. These entries either do not represent an action or will be overwritten by the server.
 
 Normalize or clip the gradient:
 
@@ -394,7 +365,8 @@ can be computed. The frozen action DiT forward pass must not be wrapped in `torc
 - Identify the action flow-time convention.
 - Identify action-token positions in the unified transformer.
 - Expose final action-token hidden states.
-- Expose context/history token hidden states for \(V(s)\).
+- Expose final normalized video-token hidden states for the value heads.
+- Verify previous-video/current-action/current-video temporal alignment.
 - Verify action chunk shape and chunk-to-environment transition alignment.
 
 ### Stage 1 — Dataset Construction
@@ -402,14 +374,13 @@ can be computed. The frozen action DiT forward pass must not be wrapped in `torc
 Build chunk-level offline transitions:
 
 ```text
-state_t
-action_chunk_t
-terminal_success_reward_t
-state_t_plus_chunk
-done_t
+previous_video_chunk -> V(s_t)
+current_action_chunk -> Q(s_t, A_t)
+current_video_chunk  -> target V(s_{t+1})
+reward_t, done_t
 ```
 
-Log task ID, instruction, episode ID, chunk index, and success status for analysis.
+Log task ID, instruction, episode ID, chunk index, predecessor validity, and success status for analysis.
 
 ### Stage 2 — Critic Baseline
 
@@ -478,7 +449,8 @@ These are initial defaults and must be validated experimentally.
 
 ```yaml
 discount_gamma: 0.99
-chunk_discount: gamma ** action_chunk_length
+infer_latent_chunk_size: 4  # must match inference frame_chunk_size
+chunk_discount: gamma ** valid_environment_actions_in_chunk
 
 expectile_tau: 0.7
 critic_lr: 3e-4
@@ -535,6 +507,10 @@ Critic input:
 
 Critic architecture:
     mean pool + LayerNorm + double MLP heads
+
+Value state:
+    previous video chunk for V(s_t)
+    current video chunk for target V(s_{t+1})
 
 RL algorithm:
     offline IQL critic learning

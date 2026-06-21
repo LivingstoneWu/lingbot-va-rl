@@ -1,0 +1,278 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+
+
+@dataclass(frozen=True)
+class ChunkRecord:
+    dataset_idx: int
+    episode_key: tuple[int, int]
+    rl_chunk_idx: int
+    frame_start: int
+    valid_frames: int
+    reward: float
+    done: bool
+    truncated: bool
+    discount: float
+    previous_record_idx: int | None = None
+    next_record_idx: int | None = None
+    mc_return: float = 0.0
+
+
+class ChunkTransitionDataset(Dataset):
+    """View latent storage segments as inference-sized offline RL transitions."""
+
+    _FRAME_DIMS = {
+        "latents": 1,
+        "actions": 1,
+        "actions_mask": 1,
+        "latents_mask": 0,
+    }
+
+    def __init__(
+        self,
+        base_dataset: Dataset,
+        infer_latent_chunk_size: int,
+        action_per_frame: int,
+        gamma: float = 0.99,
+        require_outcomes: bool = True,
+        include_previous: bool = True,
+    ) -> None:
+        if infer_latent_chunk_size <= 0:
+            raise ValueError("infer_latent_chunk_size must be positive")
+        if action_per_frame <= 0:
+            raise ValueError("action_per_frame must be positive")
+        if not 0.0 <= gamma <= 1.0:
+            raise ValueError("gamma must be in [0, 1]")
+        if not hasattr(base_dataset, "get_rl_segment_metadata"):
+            raise TypeError(
+                "base_dataset must implement get_rl_segment_metadata(idx)"
+            )
+
+        self.base_dataset = base_dataset
+        self.chunk_size = infer_latent_chunk_size
+        self.action_per_frame = action_per_frame
+        self.gamma = gamma
+        self.include_previous = include_previous
+        self.records = self._build_records(require_outcomes=require_outcomes)
+
+    def _build_records(self, require_outcomes: bool) -> list[ChunkRecord]:
+        grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for dataset_idx in range(len(self.base_dataset)):
+            metadata = dict(
+                self.base_dataset.get_rl_segment_metadata(dataset_idx)
+            )
+            metadata.setdefault("dataset_idx", dataset_idx)
+            dataset_id = int(metadata.get("dataset_id", 0))
+            episode_index = int(metadata["episode_index"])
+            if require_outcomes and "success" not in metadata:
+                raise ValueError(
+                    f"Episode {(dataset_id, episode_index)} has no success label"
+                )
+            grouped.setdefault((dataset_id, episode_index), []).append(metadata)
+
+        records: list[ChunkRecord] = []
+        episode_ranges: list[tuple[int, int]] = []
+        for episode_key in sorted(grouped):
+            segments = sorted(
+                grouped[episode_key],
+                key=lambda item: (
+                    int(item["start_frame"]),
+                    int(item["end_frame"]),
+                ),
+            )
+            self._validate_segments(episode_key, segments)
+            episode_start = len(records)
+            chunk_index = 0
+            success = bool(segments[0].get("success", False))
+            truncated = bool(segments[0].get("truncated", False))
+
+            for segment_index, segment in enumerate(segments):
+                frame_count = int(segment["latent_frame_count"])
+                is_final_segment = segment_index == len(segments) - 1
+                if (
+                    not is_final_segment
+                    and frame_count % self.chunk_size != 0
+                ):
+                    raise ValueError(
+                        "Non-final storage segment in episode "
+                        f"{episode_key} has {frame_count} latent frames, "
+                        f"not divisible by chunk size {self.chunk_size}"
+                    )
+                for frame_start in range(0, frame_count, self.chunk_size):
+                    valid_frames = min(
+                        self.chunk_size, frame_count - frame_start
+                    )
+                    records.append(
+                        ChunkRecord(
+                            dataset_idx=int(segment["dataset_idx"]),
+                            episode_key=episode_key,
+                            rl_chunk_idx=chunk_index,
+                            frame_start=frame_start,
+                            valid_frames=valid_frames,
+                            reward=0.0,
+                            done=False,
+                            truncated=False,
+                            discount=self.gamma
+                            ** (valid_frames * self.action_per_frame),
+                        )
+                    )
+                    chunk_index += 1
+
+            if len(records) == episode_start:
+                continue
+            episode_end = len(records)
+            episode_ranges.append((episode_start, episode_end))
+            for index in range(episode_start, episode_end):
+                is_terminal = index == episode_end - 1
+                record = records[index]
+                records[index] = ChunkRecord(
+                    **{
+                        **record.__dict__,
+                        "reward": float(success and is_terminal),
+                        "done": is_terminal,
+                        "truncated": bool(truncated and is_terminal),
+                        "discount": 0.0 if is_terminal else record.discount,
+                        "previous_record_idx": (
+                            None if index == episode_start else index - 1
+                        ),
+                        "next_record_idx": None if is_terminal else index + 1,
+                    }
+                )
+
+        for episode_start, episode_end in episode_ranges:
+            running_return = 0.0
+            for index in range(episode_end - 1, episode_start - 1, -1):
+                record = records[index]
+                running_return = (
+                    record.reward + record.discount * running_return
+                )
+                records[index] = ChunkRecord(
+                    **{**record.__dict__, "mc_return": running_return}
+                )
+        return records
+
+    @staticmethod
+    def _validate_segments(
+        episode_key: tuple[int, int],
+        segments: list[dict[str, Any]],
+    ) -> None:
+        outcome_fields = ("success", "truncated", "termination_reason")
+        first = segments[0]
+        for previous, current in zip(segments, segments[1:]):
+            if int(current["start_frame"]) < int(previous["start_frame"]):
+                raise ValueError(f"Unordered segments in episode {episode_key}")
+            if (
+                int(current["start_frame"]) == int(previous["start_frame"])
+                and int(current["end_frame"]) == int(previous["end_frame"])
+            ):
+                raise ValueError(f"Duplicate segment in episode {episode_key}")
+        termination_frame = first.get("termination_frame")
+        if (
+            termination_frame is not None
+            and int(segments[-1]["end_frame"]) < int(termination_frame)
+        ):
+            raise ValueError(
+                f"Episode {episode_key} ends before termination_frame"
+            )
+        for segment in segments[1:]:
+            for field in outcome_fields:
+                if (
+                    field in first
+                    and field in segment
+                    and segment[field] != first[field]
+                ):
+                    raise ValueError(
+                        f"Inconsistent {field} in episode {episode_key}"
+                    )
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    @staticmethod
+    def _slice_and_pad(
+        tensor: torch.Tensor,
+        frame_start: int,
+        valid_frames: int,
+        chunk_size: int,
+        frame_dim: int,
+    ) -> torch.Tensor:
+        sliced = tensor.narrow(frame_dim, frame_start, valid_frames)
+        if valid_frames == chunk_size:
+            return sliced
+        padding = [0, 0] * tensor.ndim
+        pair_index = 2 * (tensor.ndim - frame_dim - 1)
+        padding[pair_index + 1] = chunk_size - valid_frames
+        return F.pad(sliced, tuple(padding))
+
+    def _load_record(self, record: ChunkRecord) -> dict[str, torch.Tensor]:
+        segment = self.base_dataset[record.dataset_idx]
+        chunk: dict[str, torch.Tensor] = {}
+        for key, value in segment.items():
+            if key in self._FRAME_DIMS:
+                chunk[key] = self._slice_and_pad(
+                    value,
+                    record.frame_start,
+                    record.valid_frames,
+                    self.chunk_size,
+                    self._FRAME_DIMS[key],
+                )
+            elif key == "text_emb":
+                chunk[key] = value
+
+        required = set(self._FRAME_DIMS) | {"text_emb"}
+        missing = required.difference(chunk)
+        if missing:
+            raise KeyError(f"Base sample is missing RL fields: {sorted(missing)}")
+        return chunk
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        record = self.records[idx]
+        current = self._load_record(record)
+        result: dict[str, Any] = {
+            **current,
+            "transition_idx": torch.tensor(idx, dtype=torch.long),
+            "dataset_idx": torch.tensor(record.dataset_idx, dtype=torch.long),
+            "episode_index": torch.tensor(
+                record.episode_key[1], dtype=torch.long
+            ),
+            "rl_chunk_idx": torch.tensor(
+                record.rl_chunk_idx, dtype=torch.long
+            ),
+            "reward": torch.tensor(record.reward, dtype=torch.float32),
+            "done": torch.tensor(record.done, dtype=torch.bool),
+            "truncated": torch.tensor(record.truncated, dtype=torch.bool),
+            "discount": torch.tensor(record.discount, dtype=torch.float32),
+            "mc_return": torch.tensor(record.mc_return, dtype=torch.float32),
+            "state_valid": torch.tensor(
+                record.previous_record_idx is not None, dtype=torch.bool
+            ),
+            "next_transition_idx": torch.tensor(
+                -1 if record.next_record_idx is None else record.next_record_idx,
+                dtype=torch.long,
+            ),
+        }
+
+        if self.include_previous:
+            if record.previous_record_idx is None:
+                previous_chunk = {
+                    key: torch.zeros_like(value)
+                    for key, value in current.items()
+                }
+            else:
+                previous_chunk = self._load_record(
+                    self.records[record.previous_record_idx]
+                )
+            result.update(
+                {
+                    f"previous_{key}": value
+                    for key, value in previous_chunk.items()
+                }
+            )
+        return result
+

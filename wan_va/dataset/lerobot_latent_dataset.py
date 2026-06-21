@@ -128,6 +128,16 @@ class MultiLatentLeRobotDataset(torch.utils.data.Dataset):
             missing.extend(ds.get_missing_jepa_files())
         return missing
 
+    def get_rl_segment_metadata(self, idx: int) -> dict:
+        dataset_id = self.item_id_to_dataset_id[idx]
+        local_idx = idx - self.acc_dset_num[dataset_id]
+        metadata = dict(
+            self._datasets[dataset_id].get_rl_segment_metadata(local_idx)
+        )
+        metadata['dataset_id'] = dataset_id
+        metadata['dataset_idx'] = idx
+        return metadata
+
 class LatentLeRobotDataset(LeRobotDataset):
     def __init__(
         self,
@@ -187,10 +197,21 @@ class LatentLeRobotDataset(LeRobotDataset):
             episode_index = value["episode_index"]
             tasks = value["tasks"]
             action_config = value["action_config"]
+            outcome = {
+                name: value[name]
+                for name in (
+                    "success",
+                    "termination_frame",
+                    "termination_reason",
+                    "truncated",
+                )
+                if name in value
+            }
             for acfg in action_config:
                 cur_meta = {
                     "episode_index": episode_index,
                     "tasks": tasks,
+                    **outcome,
                 }
                 cur_meta.update(acfg)
 
@@ -203,6 +224,25 @@ class LatentLeRobotDataset(LeRobotDataset):
                 if check_statu:
                     out.append(cur_meta)
         self.new_metas = out
+
+    def get_rl_segment_metadata(self, idx: int) -> dict:
+        cur_meta = self.new_metas[idx]
+        episode_index = cur_meta["episode_index"]
+        episode_chunk = self.meta.get_episode_chunk(episode_index)
+        latent_file = (
+            Path(self.latent_path)
+            / f"chunk-{episode_chunk:03d}"
+            / self.used_video_keys[0]
+            / (
+                f"episode_{episode_index:06d}_"
+                f"{cur_meta['start_frame']}_{cur_meta['end_frame']}.pth"
+            )
+        )
+        latent_data = torch.load(latent_file, map_location="cpu", weights_only=False)
+        metadata = dict(cur_meta)
+        metadata["dataset_idx"] = idx
+        metadata["latent_frame_count"] = int(latent_data["latent_num_frames"])
+        return metadata
 
     def _check_meta(self, start_frame, end_frame, episode_index):
         episode_chunk = self.meta.get_episode_chunk(episode_index)

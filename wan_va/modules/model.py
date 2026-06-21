@@ -729,7 +729,12 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         timestep_proj = timestep_proj.unflatten(2, (6, -1))  # B L 6 C
         return temb, timestep_proj
 
-    def forward_train(self, input_dict, jepa_capture_layer: int = -1):
+    def forward_train(
+        self,
+        input_dict,
+        jepa_capture_layer: int = -1,
+        return_features: bool = False,
+    ):
         """
         Args:
             jepa_capture_layer: 0-indexed DiT layer after which to capture the
@@ -741,6 +746,9 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
             jepa_hidden is None when jepa_capture_layer < 0, otherwise a tensor
             of shape [1, B*F*H_tokens*W_tokens, inner_dim] — the noisy-latent
             stream only, ready to be reshaped and projected.
+            When return_features is true, a fourth dictionary contains normalized
+            pre-output action tokens [B,F,N,D] and video tokens
+            [B,F,S,D].
         """
         input_dict['latent_dict']['noisy_latents'] = input_dict['latent_dict']['noisy_latents'].to(torch.bfloat16)
         input_dict['latent_dict']['latent'] = input_dict['latent_dict']['latent'].to(torch.bfloat16)
@@ -833,7 +841,41 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         hidden_states = (self.norm_out(hidden_states.float()) *
                                 (1. + scale) +
                                 shift).type_as(hidden_states)
-        latent_hidden_states, _, action_hidden_states, _, _ = torch.split(hidden_states, split_list, dim=1)
+        latent_hidden_states, _, action_hidden_states, _, _ = torch.split(
+            hidden_states, split_list, dim=1
+        )
+
+        features = None
+        if return_features:
+            latent_frames = latent_dict['noisy_latents'].shape[2]
+            action_frames = action_dict['noisy_latents'].shape[2]
+            if latent_frames != action_frames:
+                raise ValueError(
+                    f"Latent/action frame mismatch: {latent_frames} != {action_frames}"
+                )
+            video_tokens_per_frame = latent_hidden_states.shape[1] // (
+                batch_size * latent_frames
+            )
+            action_tokens_per_frame = action_hidden_states.shape[1] // (
+                batch_size * action_frames
+            )
+            features = {
+                'video_tokens': rearrange(
+                    latent_hidden_states,
+                    '1 (b f s) d -> b f s d',
+                    b=batch_size,
+                    f=latent_frames,
+                    s=video_tokens_per_frame,
+                ),
+                'action_tokens': rearrange(
+                    action_hidden_states,
+                    '1 (b f n) d -> b f n d',
+                    b=batch_size,
+                    f=action_frames,
+                    n=action_tokens_per_frame,
+                ),
+            }
+
         latent_hidden_states = self.proj_out(latent_hidden_states)
         latent_hidden_states = rearrange(latent_hidden_states,
                                              '1 (b l) (n c) -> b (l n) c',
@@ -843,7 +885,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                                              '1 (b l) c -> b l c',
                                              b=batch_size)  #
 
-        return latent_hidden_states, action_hidden_states, jepa_hidden
+        outputs = (latent_hidden_states, action_hidden_states, jepa_hidden)
+        if return_features:
+            return (*outputs, features)
+        return outputs
 
     def forward(
         self,
@@ -853,6 +898,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         action_mode=False,
         train_mode=False,
         jepa_capture_layer: int = -1,
+        return_features: bool = False,
     ):
         r"""
         Forward pass through the diffusion model
@@ -874,7 +920,11 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
         if train_mode:
-            return self.forward_train(input_dict, jepa_capture_layer=jepa_capture_layer)
+            return self.forward_train(
+                input_dict,
+                jepa_capture_layer=jepa_capture_layer,
+                return_features=return_features,
+            )
         if action_mode:  # action input emb
             latent_hidden_states = rearrange(input_dict['noisy_latents'],
                                              'b c f h w -> b (f h w) c')

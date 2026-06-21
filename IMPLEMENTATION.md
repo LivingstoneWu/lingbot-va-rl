@@ -1,7 +1,7 @@
 # Phase 1 Implementation Plan: Offline Critics and Q-Guided Action Sampling
 
 **Date:** 2026-06-19
-**Status:** Planned
+**Status:** Critic training implemented; inference guidance planned
 **Design reference:** `DESIGN.md`
 
 ## Concise Overview
@@ -48,7 +48,7 @@ frozen LingBot-VA -- return_features=True
                 |
                 +--> action features ----------> Q1, Q2
                 |
-                +--> context-only features ----> V (IQL only)
+                +--> previous/current video features -> V/target-V (IQL only)
                                                    |
                                                    v
                                   versioned critic checkpoint
@@ -87,44 +87,67 @@ Required semantics:
 
 The conversion/annotation tooling must validate that every RL episode has an outcome label. Missing labels should fail dataset validation rather than silently being treated as failures.
 
-### Chunk-Level Derived Fields
+### Inference-Sized RL Chunks
 
-The RL dataset derives, rather than duplicates, sparse rewards:
+One RL action is all actions aligned to one latent video chunk. Define:
 
 ```text
-reward = 1 if success and this chunk reaches termination, otherwise 0
-done = true if this chunk reaches termination, otherwise false
-discount = 0 if done, otherwise gamma ** effective_chunk_duration
+K = infer_latent_chunk_size
+N = action_per_frame
+A_t shape = [C_action, K, N, 1]
 ```
 
-A failed terminal chunk has `reward=0` and `done=true`. It must never bootstrap into the first chunk of another episode. Timeouts remain distinguishable through `truncated`, even if the initial Phase 1 target treats them as terminal.
+An `action_config` entry is only a stored/precomputed clip and may contain many latent frames. The RL transition view partitions its valid latent-frame dimension into consecutive K-frame chunks. Thus one storage clip with `F_total` latent frames can yield multiple RL transitions.
 
-Each training sample should expose:
+The training value of `infer_latent_chunk_size` must match inference `frame_chunk_size`. This avoids training Q on a different action horizon and attention pattern from the generated action chunk.
+
+The RL dataset derives sparse rewards per K-frame chunk:
+
+```text
+reward = 1 if success and this RL chunk reaches episode termination, otherwise 0
+done = true if this RL chunk reaches episode termination, otherwise false
+discount = 0 if done, otherwise gamma ** valid_environment_actions_in_chunk
+```
+
+A failed terminal chunk has `reward=0` and `done=true`. A partial terminal chunk may be padded to K latent frames, but its latent and action masks must exclude padding from feature pooling and losses.
+
+Each transition should expose:
 
 ```text
 episode_index
-chunk_index
-task/instruction
-state inputs
-action chunk and validity mask
-reward
-done
-truncated
-discount
-next transition reference or next-state inputs
+storage_segment_idx
+rl_chunk_idx
+latent_start/end
+latent/action tensors for K frames
+latent and action masks
+reward, done, truncated, discount
+predecessor and successor transition references
+state_valid (false only when no predecessor exists)
 ```
 
-### Dataset Module Changes
+### RL Transition Wrapper
 
-Extend `wan_va/dataset/lerobot_latent_dataset.py` conservatively:
+Keep `LatentLeRobotDataset` responsible for loading complete precomputed segments:
 
-1. Preserve the existing supervised-training output by default.
-2. Parse and retain episode outcome metadata in `new_metas`.
-3. Add an RL transition wrapper or explicit RL mode instead of coupling Bellman-transition logic to normal flow training.
-4. Build successor indices after sorting chunks within each episode.
-5. Validate episode boundaries, chunk ordering, terminal alignment, and missing outcome labels.
+```text
+latents:      [C_video, F_total, H, W]
+actions:      [C_action, F_total, N, 1]
+latents_mask: [F_total]
+actions_mask: [C_action, F_total, N, 1]
+```
 
-Prefer a wrapper such as `ChunkTransitionDataset` under `wan_va/rl/transitions.py`. This keeps the existing dataset useful to both training pipelines and gives RL-specific behavior a narrow ownership boundary.
+Add `ChunkTransitionDataset` in `wan_va/rl/transitions.py` as a view over the base dataset. It will:
+
+1. Parse episode outcomes retained in `new_metas`.
+2. Order storage segments by episode and frame range.
+3. Partition valid latent frames into K-frame RL chunks.
+4. Assign stable transition indices and link each chunk to its previous and next chronological chunks in the same episode.
+5. Derive reward, done, discount, predecessor validity, and masks.
+6. Reject duplicate ranges, inconsistent outcomes, premature termination, and non-final segments that cannot be partitioned into full K-frame chunks.
+
+The predecessor link supplies the video chunk used by online `V(s_t)`. The successor link remains useful for chronological validation and backward MC-return computation. For the first episode chunk, predecessor tensors are zero placeholders and `state_valid=false`, so only its value expectile loss is masked.
+
+This wrapper leaves supervised flow training unchanged and keeps reward/Bellman semantics outside latent decoding.
 
 ## Frozen Model Feature Interface
 
@@ -139,17 +162,17 @@ prediction, features = model(..., return_features=True)
 
 features = {
     "action_tokens": action_tokens,
-    "context_tokens": context_tokens,
-    "action_mask": action_mask,
-    "feature_spec": feature_spec,
+    "video_tokens": video_tokens,
 }
 ```
 
 Feature requirements:
 
 - Capture final normalized transformer hidden states before `action_proj_out`.
-- Preserve token masks for masked pooling.
-- Clearly define which streams comprise `context_tokens`.
+- Preserve the action layout as `[B, K, N, D]` for one RL chunk.
+- Preserve latent/action masks for pooling across valid `K × N` tokens.
+- Set the training attention `chunk_size` to `infer_latent_chunk_size`, matching inference `frame_chunk_size`.
+- Return final normalized video tokens as `video_tokens`.
 - Do not detach inside the model interface; the caller controls gradient behavior.
 - Keep feature extraction numerically identical between critic training and guided inference.
 
@@ -174,10 +197,12 @@ clean_action = noisy_action - sigma * predicted_velocity
 
 ### Shared Feature Construction
 
-- Masked-mean pool final action tokens for `Q(s, A)`.
-- Pool a verified context-only representation for `V(s)`.
+- Reshape action hidden states to `[B, K, N, D]`.
+- Masked-mean pool over both K and N, producing one state-action representation and one Q value per RL chunk.
+- Pool previous-chunk `video_tokens` for online `V(s_t)`.
+- Pool current-chunk `video_tokens` with target V for `V(s_{t+1})`.
 - Apply layer normalization before each MLP head.
-- Keep pooling and feature selection in versioned feature-extractor components.
+- Keep pooling, K, and feature selection in the versioned feature specification.
 
 ### Twin Q Heads
 
@@ -198,23 +223,29 @@ The minimum reduces optimistic critic errors, especially when gradients later se
 
 ### IQL Value Head
 
-IQL additionally trains `V(s)` from context-only features using expectile regression against a stopped-gradient `min(Q1, Q2)` target. Maintain an EMA target value head for Bellman targets.
+IQL trains online `V(s_t)` from pooled video tokens of the previous latent chunk and applies the EMA target V to pooled video tokens of the current latent chunk for `V(s_{t+1})`. The current action hidden state remains the Q input.
 
-If context-only feature extraction is not trustworthy in the first implementation session, complete the MC baseline before enabling IQL. Do not approximate `V(s)` using current-action tokens, because that changes the algorithm.
+The first episode chunk has no previous video chunk. Keep its Q loss, but mask its expectile V loss with `state_valid=false`. Never use current video tokens for online `V(s_t)`, because they already encode information about the current action chunk.
 
 ## Separate Critic Training Pipeline
 
-Create a standalone entry point, proposed as `wan_va/rl/train_critic.py`. It may reuse checkpoint loading, distributed setup, logging, and dataset utilities, but it should not extend the flow-loss loop in `wan_va/train.py`.
+The standalone entry point is `wan_va/rl/train_critic.py`. It reuses model loading and distributed FSDP support without extending the flow-loss loop in `wan_va/train.py`.
+
+```bash
+python -m wan_va.rl.train_critic \
+  --config wan_va/configs/critic_phase1.example.json
+```
 
 Training responsibilities:
 
 1. Load a pretrained LingBot-VA checkpoint.
 2. Freeze all base-model parameters.
-3. Build chunk transitions and balanced/suitable sampling over successful and failed trajectories.
-4. Extract clean-action and context features.
-5. Train only Q heads and, for IQL, V/target-V heads.
-6. Log losses, calibration, rankings, success/failure separation, and return distributions.
-7. Save critic state, optimizer state, resolved training config, and compatibility metadata.
+3. Build chunk transitions with explicit predecessor/successor links.
+4. Extract current action/video features and previous video features.
+5. Train Q from current action tokens, online V from previous video tokens, and target V from current video tokens.
+6. Mask only first-chunk V losses while retaining their Q losses.
+7. Log losses, calibration, rankings, success/failure separation, and return distributions.
+8. Save critic state, optimizer state, resolved training config, and compatibility metadata.
 
 The base model may require autograd during later guided inference with respect to candidate action inputs, but its parameters remain frozen. Critic training should avoid retaining base-model activation gradients when they are not needed.
 
@@ -229,6 +260,7 @@ training:
   feature_type: final_action_tokens_v1
   reward_type: sparse_terminal_v1
   action_feature_sigma: 0.0
+  infer_latent_chunk_size: 4  # must match inference frame_chunk_size
 
 dataset:
   path: ...
@@ -270,6 +302,9 @@ critic and feature component versions
 algorithm (MC or IQL)
 base-model checkpoint identity/hash
 feature dimensions and token source
+infer_latent_chunk_size and action_per_frame
+chunk partitioning, padding, pooling, and predecessor/successor conventions
+value-state alignment version
 reward definition version
 dataset fingerprint
 action normalization statistics
@@ -301,7 +336,15 @@ candidate_rerank_v1
 future advantage-based guidance
 ```
 
-The later inference implementation should use a guidance registry and validate critic/feature compatibility. Gradient guidance will enable autograd only for the candidate action path while keeping LingBot-VA parameters frozen.
+The later inference implementation should use a guidance registry and validate critic/feature compatibility. Inference samples one full action field with shape `[B,C,F,N,1]`, where `F=frame_chunk_size=infer_latent_chunk_size`. The critic pools the valid hidden states across `F × N` and returns one Q value per batch item, so no per-latent Q reduction is required.
+
+Gradient guidance will enable autograd only for the candidate action path while keeping LingBot-VA parameters frozen. Before adding the gradient to the flow velocity, mask out:
+
+- padded latent/action positions, which are not part of the RL action;
+- invalid model action channels, which are placeholders for unavailable robot dimensions;
+- `action_cond` positions clamped by the server, because they are overwritten after every scheduler step and are not controllable.
+
+The fixed/clamped values may still be present as critic context; only their guidance update is zeroed.
 
 ## Proposed Module Layout
 
@@ -348,7 +391,7 @@ Configuration files should live with the existing configuration system unless re
 
 ### Session 4: IQL
 
-- Add context-only value features and the V head.
+- Add previous/current video-state features and the V/target-V heads.
 - Implement expectile value loss, EMA target V, and twin-Q Bellman targets.
 - Compare MC and IQL calibration and ranking diagnostics.
 
@@ -372,11 +415,14 @@ Do not proceed to guided inference until all of the following hold:
 
 - Episode labels are complete and transition boundaries are correct.
 - Terminal rewards and discounts have unit tests.
+- `infer_latent_chunk_size` matches inference `frame_chunk_size`.
+- Q pooling covers valid `K × N` tokens and returns one value per RL chunk.
 - `return_features=False` preserves existing model behavior.
 - Frozen backbone parameters receive no updates during critic training.
 - Q values separate held-out successful and failed behavior better than trivial baselines.
 - Twin critics do not exhibit uncontrolled disagreement or value scale growth.
-- IQL context features exclude the candidate action.
+- Online `V(s_t)` uses previous video tokens; target `V(s_{t+1})` uses current video tokens.
+- First-chunk value losses are masked without removing their Q losses.
 - Checkpoint manifests reject incompatible base models or feature specifications.
 
 Phase 1 is complete only after unguided and guided evaluation can be reproduced from a critic checkpoint plus an immutable experiment configuration and saved result directory.
