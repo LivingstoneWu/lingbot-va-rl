@@ -37,6 +37,8 @@ class CriticTrainingConfig:
             raise ValueError("algorithm must be 'mc' or 'iql'")
         if self.infer_latent_chunk_size <= 0:
             raise ValueError("infer_latent_chunk_size must be positive")
+        if self.log_interval <= 0:
+            raise ValueError("log_interval must be positive")
         if not 0.0 <= self.gamma <= 1.0:
             raise ValueError("gamma must be in [0, 1]")
         if not 0.0 < self.expectile < 1.0:

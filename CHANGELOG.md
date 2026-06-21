@@ -15,6 +15,16 @@
 - `extract_robotwin.sh`: launches the dedicated RobotWin extractor with the accessible RL config and `256x320` high-camera resolution.
 - `_prepare_clean_input`: casts floating dataset tensors to `base_config.param_dtype` before frozen-transformer feature extraction.
 - `IMPLEMENTATION.md`: documents the BF16-transformer/FP32-critic dtype path and additional changes required for full FP32 backbone support.
+- `CriticTrainer._parameter_norm`: computes the global L2 norm of trainable critic parameters for logging.
+- `CriticTrainer.train`: writes compact `loss.jsonl` records under `output_dir/checkpoints` at `log_interval` with loss, gradient norm, and parameter norm.
+- `CriticTrainingConfig.__post_init__`: rejects non-positive `log_interval` values.
+- `workflow.md`: documents the `loss.jsonl` path and record fields.
+
+### Verification
+
+- `PYTHONPATH=. pytest -q tests/test_rl_transitions.py tests/test_rl_critics.py tests/test_rl_config.py tests/test_rl_checkpoint.py`: 11 passed.
+- Direct LingBot-environment assertion: `CriticTrainer._parameter_norm` returned `5.0` for trainable parameters `[3,4]` while excluding a frozen parameter.
+
 
 ## 2026-06-20 - IQL Value-State Alignment
 

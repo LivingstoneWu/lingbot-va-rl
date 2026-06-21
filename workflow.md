@@ -36,7 +36,7 @@ The loader is strict: unknown keys cause an error.
 
 Required run choices:
 
-- `output_dir`: new directory for this run's config, logs, and checkpoints.
+- `output_dir`: new run directory; artifacts are written under its `checkpoints/` subdirectory.
 - `algorithm`: `"mc"` for twin-Q Monte Carlo return regression or `"iql"` for
   twin Q plus an expectile V head.
 - `critic_type`: currently `"twin_mlp_v1"`.
@@ -79,7 +79,7 @@ Optimization and runtime:
 - `log_interval` and `save_interval` are measured in optimizer steps.
 - `seed` initializes Python, NumPy, PyTorch, and distributed sampler ordering.
 - `resume_from` is null for a new run or a critic checkpoint directory such as
-  `.../checkpoint_00001000` when resuming.
+  `.../checkpoints/checkpoint_00001000` when resuming.
 
 The critic JSON overrides the selected base config's `batch_size`; it does not
 use the base config's `gradient_accumulation_steps` or `load_worker` values.
@@ -116,24 +116,25 @@ Rank 0 writes:
 
 ```text
 <output_dir>/
-  config.json
-  train.jsonl
-  checkpoint_00001000/
+  checkpoints/
     config.json
-    manifest.json
-    training_state.pt
+    loss.jsonl
+    checkpoint_00001000/
+      config.json
+      manifest.json
+      training_state.pt
 ```
 
-`train.jsonl` records loss, Q means and disagreement, target mean, value loss,
-and gradient norm at `log_interval`. Checkpoints are written at
-`save_interval` and once more at the final step.
+`checkpoints/loss.jsonl` records step, time, loss, gradient norm, and critic parameter norm
+at `log_interval`. Checkpoints are written at `save_interval` and once more at
+the final step.
 
 To resume, create a new run config or edit the current one:
 
 ```json
 {
   "output_dir": "./checkpoints/phase1_critic_iql_resume",
-  "resume_from": "./checkpoints/phase1_critic_iql/checkpoint_00001000"
+  "resume_from": "./checkpoints/phase1_critic_iql/checkpoints/checkpoint_00001000"
 }
 ```
 

@@ -227,12 +227,13 @@ class CriticTrainer:
             )
 
         self.output_dir = Path(config.output_dir)
+        self.checkpoint_dir = self.output_dir / "checkpoints"
         if rank == 0:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            (self.output_dir / "config.json").write_text(
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            (self.checkpoint_dir / "config.json").write_text(
                 json.dumps(config.to_dict(), indent=2) + "\n"
             )
-        self.log_path = self.output_dir / "train.jsonl"
+        self.log_path = self.checkpoint_dir / "loss.jsonl"
 
     @torch.no_grad()
     def _extract_features(
@@ -358,11 +359,21 @@ class CriticTrainer:
             for key, value in metrics.items()
         }
 
+    @torch.no_grad()
+    def _parameter_norm(self) -> float:
+        squared_norm = torch.zeros(
+            (), device=self.device, dtype=torch.float32
+        )
+        for parameter in self.bundle.parameters():
+            if parameter.requires_grad:
+                squared_norm += parameter.detach().float().square().sum()
+        return float(squared_norm.sqrt().cpu())
+
     def _save(self) -> None:
         if self.rank != 0:
             return
         save_critic_checkpoint(
-            directory=self.output_dir / f"checkpoint_{self.step:08d}",
+            directory=self.checkpoint_dir / f"checkpoint_{self.step:08d}",
             bundle=self.bundle,
             optimizer=self.optimizer,
             config=self.config,
@@ -409,7 +420,9 @@ class CriticTrainer:
                         entry = {
                             "step": self.step,
                             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                            **metrics,
+                            "loss": metrics["loss"],
+                            "grad_norm": metrics["grad_norm"],
+                            "param_norm": self._parameter_norm(),
                         }
                         with self.log_path.open("a") as handle:
                             handle.write(json.dumps(entry) + "\n")

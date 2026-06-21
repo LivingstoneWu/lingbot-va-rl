@@ -30,3 +30,13 @@ def test_config_validates_algorithm():
             algorithm="unknown",
         )
 
+
+def test_config_validates_log_interval():
+    with pytest.raises(ValueError, match="log_interval"):
+        CriticTrainingConfig(
+            base_config_name="demo_train",
+            output_dir="out",
+            infer_latent_chunk_size=4,
+            log_interval=0,
+        )
+
