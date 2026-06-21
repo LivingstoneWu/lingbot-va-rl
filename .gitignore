@@ -22,3 +22,5 @@ debug/
 *log/
 *data/
 checkpoint*/
+qam/
+codex.sh
