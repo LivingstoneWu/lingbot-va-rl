@@ -104,6 +104,6 @@ va_robotwin_jepatrain_full_cfg.save_root = './checkpoints/robotwin_full_jepa/bs3
 robotwin_qgf_v1_cfg_place_can_basket_generated = EasyDict(__name__='Config: VA robotwin train')
 robotwin_qgf_v1_cfg_place_can_basket_generated.update(va_robotwin_jepatrain10_cfg)
 robotwin_qgf_v1_cfg_place_can_basket_generated.dataset_path = "/luhongchao/shared/dataset/robotwin_rl_converted/place_can_basket_robotwin_generated_100"
-robotwin_qgf_v1_cfg_place_can_basket_generated.empty_emb_path = "/luhongchao/shared/dataset/robotwin_converted/empty_emb.pt"
+robotwin_qgf_v1_cfg_place_can_basket_generated.empty_emb_path = "/luhongchao/shared/dataset/robotwin_rl_converted/place_can_basket_robotwin_generated_100/empty_emb.pt"
 robotwin_qgf_v1_cfg_place_can_basket_generated.frame_chunk_size = 2
 robotwin_qgf_v1_cfg_place_can_basket_generated.wan22_pretrained_model_name_or_path = "/luhongchao/shared/weights/lingbot-va-posttrain-robotwin"

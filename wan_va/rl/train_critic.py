@@ -90,9 +90,15 @@ def _prepare_clean_input(
     chunk_size: int,
     window_size: int,
     device: torch.device,
+    model_dtype: torch.dtype,
 ) -> dict[str, Any]:
     def get(name: str) -> torch.Tensor:
-        return batch[f"{prefix}{name}"].to(device, non_blocking=True)
+        tensor = batch[f"{prefix}{name}"].to(
+            device, non_blocking=True
+        )
+        if tensor.is_floating_point():
+            tensor = tensor.to(dtype=model_dtype)
+        return tensor
 
     latents = get("latents")
     actions = get("actions")
@@ -241,6 +247,7 @@ class CriticTrainer:
             chunk_size=self.config.infer_latent_chunk_size,
             window_size=self.config.window_size,
             device=self.device,
+            model_dtype=self.base_config.param_dtype,
         )
         outputs = self.transformer(
             input_dict,

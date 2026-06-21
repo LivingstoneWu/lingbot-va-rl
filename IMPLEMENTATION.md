@@ -249,6 +249,28 @@ Training responsibilities:
 
 The base model may require autograd during later guided inference with respect to candidate action inputs, but its parameters remain frozen. Critic training should avoid retaining base-model activation gradients when they are not needed.
 
+### Dtype Control
+
+The current critic pipeline uses a BF16 frozen transformer and FP32 critic
+heads. The transformer checkpoint is initially loaded on CPU as FP32, then
+converted or FSDP-sharded according to the LingBot-VA base config's
+`param_dtype`, which is currently `torch.bfloat16`. `_prepare_clean_input`
+casts floating dataset tensors, including text embeddings, latents, and
+actions, to that dtype; masks remain boolean. Transformer action/video
+features are pooled and converted to FP32 before entering Q or V. The Q, V,
+target-V, losses, optimizer parameters, and optimizer state remain FP32.
+
+Changing only the base config's `param_dtype` to `torch.float32` is not
+sufficient for an FP32 transformer. `WanTransformer3DModel.forward_train`
+currently hard-casts latent and action inputs to BF16, and distributed
+`shard_model` defaults its mixed-precision parameter dtype to BF16 because
+`_configure_model` does not forward the requested `param_dtype` to the shard
+function. Full FP32 backbone support requires replacing the hard-coded input
+casts with the transformer's parameter dtype and passing `param_dtype` into
+the FSDP sharding policy. The critic can remain FP32 unchanged. Expect roughly
+twice the BF16 parameter and activation memory for an FP32 transformer.
+
+
 ## Training Configuration And Registry
 
 The critic training config controls training only:

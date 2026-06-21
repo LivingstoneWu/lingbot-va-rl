@@ -13,6 +13,8 @@
 - `DESIGN.md`: uses `$...$` for inline equations and `$$...$$` for display equations.
 - `extract_latent_vae.main`: accepts optional config-validation and per-camera-size hooks while retaining uniform sizing by default.
 - `extract_robotwin.sh`: launches the dedicated RobotWin extractor with the accessible RL config and `256x320` high-camera resolution.
+- `_prepare_clean_input`: casts floating dataset tensors to `base_config.param_dtype` before frozen-transformer feature extraction.
+- `IMPLEMENTATION.md`: documents the BF16-transformer/FP32-critic dtype path and additional changes required for full FP32 backbone support.
 
 ## 2026-06-20 - IQL Value-State Alignment
 
