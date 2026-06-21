@@ -637,12 +637,16 @@ def process_episode(video_processor, vae_encoder, tokenizer, text_encoder,
     return len(chunks)
 
 
-def main():
+def main(
+    camera_size_resolver=None,
+    config_validator=None,
+    default_config_name='robotwin',
+):
     parser = argparse.ArgumentParser(description="Extract latents using Wan2.2 VAE")
     parser.add_argument(
         "--config-name",
         type=str,
-        default='robotwin',
+        default=default_config_name,
         help="config name from VA_CONFIGS"
     )
     parser.add_argument(
@@ -712,6 +716,8 @@ def main():
     
     # 获取配置
     config = VA_CONFIGS[args.config_name]
+    if config_validator is not None:
+        config_validator(config, args)
     env_local_rank = int(os.environ.get("LOCAL_RANK", args.local_rank))
     rank = int(os.environ.get("RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -743,13 +749,6 @@ def main():
         torch_device=device,
     )
     
-    # 初始化视频处理器
-    video_processor = VideoProcessor(
-        target_fps=args.target_fps,
-        target_height=args.height,
-        target_width=args.width,
-        chunk_size=args.chunk_size
-    )
     
     # 设置目录
     dataset_root = Path(args.dataset_root)
@@ -818,6 +817,25 @@ def main():
 
         save_camera_dir = latents_dir / f'chunk-{chunk_id}' / f'observation.images.{camera_key}'
         save_camera_dir.mkdir(parents=True, exist_ok=True)
+
+        camera_height, camera_width = args.height, args.width
+        if camera_size_resolver is not None:
+            camera_height, camera_width = camera_size_resolver(
+                camera_key,
+                args.height,
+                args.width,
+                config,
+            )
+        logger.info(
+            f'Camera {camera_key}: preprocessing at '
+            f'{camera_height}x{camera_width}'
+        )
+        video_processor = VideoProcessor(
+            target_fps=args.target_fps,
+            target_height=camera_height,
+            target_width=camera_width,
+            chunk_size=args.chunk_size,
+        )
 
         num_chunks = process_episode(
             video_processor=video_processor,

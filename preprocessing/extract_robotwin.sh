@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Used to extract latents for ur5
+# Extract RobotWin latents with the high/wrist T-shaped camera layout.
 
 set -euo pipefail
 
@@ -18,23 +18,23 @@ export TORCH_SHOW_CPP_STACKTRACES=1
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
-  torchrun --nproc_per_node "${NPROC_PER_NODE}" "${SCRIPT_DIR}/extract_latent_vae.py" \
-    --config-name "demo" \
+  torchrun --nproc_per_node "${NPROC_PER_NODE}" "${SCRIPT_DIR}/extract_latent_vae_robotwin.py" \
+    --config-name "robotwin_qgf_v1_cfg_place_can_basket_generated" \
     --dataset-root "/luhongchao/shared/dataset/robotwin_rl_converted/place_can_basket_robotwin_generated_100" \
     --camera-keys "cam_high" "cam_left_wrist" "cam_right_wrist" \
     --target-fps "12.5" \
     --height "256" \
-    --width "256" \
+    --width "320" \
     --chunk-size "501" \
     --batch-size "${BATCH_SIZE}"
 else
-  python "${SCRIPT_DIR}/extract_latent_vae.py" \
-    --config-name "demo" \
+  python "${SCRIPT_DIR}/extract_latent_vae_robotwin.py" \
+    --config-name "robotwin_qgf_v1_cfg_place_can_basket_generated" \
     --dataset-root "/luhongchao/shared/dataset/robotwin_rl_converted/place_can_basket_robotwin_generated_100" \
     --camera-keys "cam_high" "cam_left_wrist" "cam_right_wrist" \
     --target-fps "12.5" \
     --height "256" \
-    --width "256" \
+    --width "320" \
     --chunk-size "501" \
     --batch-size "${BATCH_SIZE}"
 fi

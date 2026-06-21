@@ -5,10 +5,14 @@
 ### Added
 
 - `workflow.md`: documents dataset preflight, base/critic config ownership, per-rank loader settings, attention-window semantics, launch commands, monitoring, and checkpoint resume behavior.
+- `extract_latent_vae_robotwin.py`: validates RobotWin camera ordering and maps the high camera to full resolution and wrist cameras to half resolution before VAE encoding.
+- `test_robotwin_latent_extraction.py`: covers valid T-shape sizes and rejects incompatible camera order, resolution, and environment configs.
 
 ### Changed
 
 - `DESIGN.md`: uses `$...$` for inline equations and `$$...$$` for display equations.
+- `extract_latent_vae.main`: accepts optional config-validation and per-camera-size hooks while retaining uniform sizing by default.
+- `extract_robotwin.sh`: launches the dedicated RobotWin extractor with the accessible RL config and `256x320` high-camera resolution.
 
 ## 2026-06-20 - IQL Value-State Alignment
 
