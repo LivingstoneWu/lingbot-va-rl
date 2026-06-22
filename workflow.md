@@ -156,6 +156,80 @@ optimizer state and rejects incompatible checkpoint schema, algorithm,
 `infer_latent_chunk_size` values. Set `num_steps` to the desired final global
 step, not the number of additional steps.
 
+## 6. Run Q-Guided Inference
+
+Q-guided flow matching uses a separate server entry point:
+`wan_va/wan_va_server_q_guiding.py`. The original `wan_va_server.py` remains
+the unguided baseline. The guided server keeps the same reset, KV-cache, and
+action response interface, and modifies only the action denoising loop.
+
+Launch from the repository root:
+
+```bash
+PYTHONPATH=. python -m wan_va.wan_va_server_q_guiding \
+  --config-name robotwin \
+  --eval_model_path /path/to/lingbot-va/checkpoint \
+  --q_checkpoint /path/to/critic/checkpoints/checkpoint_00010000 \
+  --q_guidance_scale 0.1 \
+  --q_guidance_beta 2.0 \
+  --q_objective min \
+  --port 8000 \
+  --robotwin
+```
+
+Use the same `--config-name`, `--eval_model_path`, `--port`, `--save_root`,
+and `--robotwin` meanings as the unguided server. Q-specific arguments are:
+
+- `--q_checkpoint`: critic checkpoint directory containing `config.json`,
+  `manifest.json`, and `training_state.pt`.
+- `--q_guidance_scale`: global strength of the Q-gradient correction. Use
+  `0.0` to load the guided server but disable guidance.
+- `--q_guidance_beta`: cap for the denoising-step-aware scale; default `2.0`.
+- `--q_guidance_start_step` and `--q_guidance_end_step`: inclusive action
+  denoising-step range where Q guidance is active. `-1` for the end step means
+  no upper bound.
+- `--q_objective`: which twin-Q objective to maximize: `min`, `mean`, `q1`,
+  or `q2`. Use `min` by default.
+- `--q_grad_clip`: optional elementwise clip for the clean-action Q gradient;
+  `0.0` disables clipping.
+- `--q_grad_normalize`: optionally RMS-normalize the masked gradient before
+  scaling.
+
+The guided server validates that the critic checkpoint's
+`infer_latent_chunk_size` equals the inference `frame_chunk_size`; when present,
+the manifest `action_per_frame` must also match the base VA config. The critic's
+`feature_layers`, `feature_aggregation`, and `feature_normalization` are read
+from the checkpoint, so do not choose feature taps independently at inference.
+Older schema-2 critic checkpoints trained before configurable feature layers
+are accepted as legacy final-feature checkpoints and are treated as
+`feature_layers=[-1]`, `feature_aggregation=single`, and
+`feature_normalization=final_adaptive_norm_v1`.
+
+The current QGF implementation evaluates Q on the clean action estimate:
+
+```text
+clean_action = noisy_action - sigma * predicted_velocity
+```
+
+It then applies a positive Q update in clean-action space. Because this
+repository's flow velocity predicts `noise - clean`, the equivalent velocity
+correction has a minus sign:
+
+```text
+guided_velocity = predicted_velocity - guidance_scale * scale * grad_Q / sigma
+```
+
+The denoising-step scale uses the configured scheduler sigma as the current
+time value, descending from high noise to low noise:
+
+```text
+r_square = time**2 / (time**2 + (1.0 - time)**2)
+scale = min(beta, time / ((1.0 - time) * r_square + 1e-8))
+```
+
+Guidance masks invalid action channels and first-frame `action_cond` positions
+that the server clamps after every scheduler step.
+
 ## Preflight Checklist
 
 - Every selected episode has `success` in `meta/episodes.jsonl`.
@@ -166,5 +240,7 @@ step, not the number of additional steps.
 - `feature_layers` contains one valid zero-based block index or `-1`.
 - `feature_aggregation` is `"single"`.
 - `output_dir` and `resume_from` identify the intended run.
+- For Q-guided inference, `--q_checkpoint` matches the same action horizon and
+  feature tap as the target inference server config.
 - For non-final storage segments, latent frame count is divisible by the chunk
   size; the final segment covers `termination_frame` when provided.

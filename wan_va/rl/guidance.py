@@ -111,6 +111,7 @@ def load_q_guidance_artifact(
     config = CriticTrainingConfig.from_json(checkpoint / "config.json")
     with (checkpoint / "manifest.json").open() as handle:
         manifest = json.load(handle)
+    manifest = _upgrade_legacy_guidance_manifest(manifest, config)
     if manifest.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError(
             f"Unsupported checkpoint schema: {manifest.get('schema_version')}"
@@ -144,6 +145,26 @@ def load_q_guidance_artifact(
         manifest=manifest,
         adapter=adapter,
     )
+
+
+def _upgrade_legacy_guidance_manifest(
+    manifest: dict[str, Any],
+    config: CriticTrainingConfig,
+) -> dict[str, Any]:
+    schema_version = manifest.get("schema_version")
+    if schema_version != 2:
+        return manifest
+    if config.feature_layers != (-1,):
+        raise ValueError(
+            "Legacy schema-2 Q checkpoints are compatible only with the "
+            "default final feature tap feature_layers=[-1]"
+        )
+    upgraded = dict(manifest)
+    upgraded["schema_version"] = CHECKPOINT_SCHEMA_VERSION
+    upgraded.setdefault("feature_layers", [-1])
+    upgraded.setdefault("feature_aggregation", "single")
+    upgraded.setdefault("feature_normalization", "final_adaptive_norm_v1")
+    return upgraded
 
 
 def _validate_manifest_matches_config(

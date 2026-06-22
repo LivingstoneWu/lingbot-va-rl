@@ -415,6 +415,17 @@ twin-Q head. IQL checkpoints load the value heads for state-dict compatibility,
 but guidance uses only the Q head. Future Q module versions should be added to
 the guidance registry rather than special-cased in the server.
 
+Legacy schema-2 critic checkpoints are accepted only for the pre-feature-layer
+default behavior. The loader upgrades them in memory as:
+
+```text
+feature_layers = [-1]
+feature_aggregation = single
+feature_normalization = final_adaptive_norm_v1
+```
+
+No other schema-2 feature tap is inferred.
+
 Before inference starts, the guided server validates:
 
 - `infer_latent_chunk_size == frame_chunk_size`;
