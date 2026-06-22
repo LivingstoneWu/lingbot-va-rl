@@ -106,8 +106,6 @@ class QGuidedVA_Server(VA_Server):
 
     @contextmanager
     def _q_feature_extraction_context(self):
-        attention_mask = FlexAttnFunc.attention_mask
-        cross_attention_mask = FlexAttnFunc.cross_attention_mask
         missing = object()
         saved_caches = []
         for block in self.transformer.blocks:
@@ -125,8 +123,11 @@ class QGuidedVA_Server(VA_Server):
                     caches.pop(self.cache_name, None)
                 else:
                     caches[self.cache_name] = saved
-            FlexAttnFunc.attention_mask = attention_mask
-            FlexAttnFunc.cross_attention_mask = cross_attention_mask
+            # The training-style feature pass creates square block masks for
+            # the current chunk. The regular server forward attends over its
+            # live KV cache, so those masks are invalid after this context.
+            FlexAttnFunc.attention_mask = None
+            FlexAttnFunc.cross_attention_mask = None
 
     def _q_guided_velocity(
         self,
