@@ -107,3 +107,6 @@ robotwin_qgf_v1_cfg_place_can_basket_generated.dataset_path = "/luhongchao/share
 robotwin_qgf_v1_cfg_place_can_basket_generated.empty_emb_path = "/luhongchao/shared/dataset/robotwin_rl_converted/place_can_basket_robotwin_generated_100/empty_emb.pt"
 robotwin_qgf_v1_cfg_place_can_basket_generated.frame_chunk_size = 2
 robotwin_qgf_v1_cfg_place_can_basket_generated.wan22_pretrained_model_name_or_path = "/luhongchao/shared/weights/lingbot-va-posttrain-robotwin"
+robotwin_qgf_v1_cfg_place_can_basket_generated.num_inference_steps = 20
+robotwin_qgf_v1_cfg_place_can_basket_generated.video_exec_step = 20
+robotwin_qgf_v1_cfg_place_can_basket_generated.action_num_inference_steps = 10

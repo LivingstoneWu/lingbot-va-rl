@@ -172,6 +172,7 @@ PYTHONPATH=. python -m wan_va.wan_va_server_q_guiding \
   --q_checkpoint /path/to/critic/checkpoints/checkpoint_00010000 \
   --q_guidance_scale 0.1 \
   --q_guidance_beta 2.0 \
+  --q_guidance_interval 5 \
   --q_objective min \
   --port 8000 \
   --robotwin
@@ -188,6 +189,9 @@ and `--robotwin` meanings as the unguided server. Q-specific arguments are:
 - `--q_guidance_start_step` and `--q_guidance_end_step`: inclusive action
   denoising-step range where Q guidance is active. `-1` for the end step means
   no upper bound.
+- `--q_guidance_interval`: apply Q guidance every N active action denoising
+  steps. The default `1` guides every active step; larger values reduce the
+  number of expensive Q feature-gradient passes.
 - `--q_objective`: which twin-Q objective to maximize: `min`, `mean`, `q1`,
   or `q2`. Use `min` by default.
 - `--q_grad_clip`: optional elementwise clip for the clean-action Q gradient;

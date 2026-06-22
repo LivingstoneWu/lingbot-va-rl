@@ -387,10 +387,11 @@ clean_action = noisy_action - sigma * predicted_velocity
    Mask clearing is done through the loaded transformer's actual attention-op
    class, not an imported `wan_va.modules.model.FlexAttnFunc`, because the
    server may load the model through the top-level `modules.model` path.
-   The guided server also replaces the loaded FlexAttention class's compiled
-   `flex_attn` wrapper with raw `torch.nn.attention.flex_attention` to avoid
-   TorchInductor failures when alternating cached inference shapes and
-   Q-feature square-mask shapes.
+   The Q feature pass temporarily replaces the loaded FlexAttention class's
+   compiled `flex_attn` wrapper with raw `torch.nn.attention.flex_attention`;
+   normal video/action denoising restores the original compiled callable.
+   This avoids TorchInductor failures for the Q square-mask shape without
+   slowing the ordinary cached denoising forwards.
 6. Masks invalid action channels and server-clamped `action_cond` positions.
 7. Applies denoising-step-aware scaling:
 
@@ -409,6 +410,11 @@ guided_velocity = predicted_velocity - guidance_scale * scale * grad / sigma
 
 Optional gradient RMS normalization and elementwise clipping are exposed as
 runtime arguments for experiments.
+
+`q_guidance_interval` can skip Q guidance on intermediate action denoising
+steps. This is the primary first-version speed knob because each guided step
+requires a full transformer feature forward and backward pass with respect to
+the clean action estimate.
 
 ### Guidance Checkpoint Loading
 
