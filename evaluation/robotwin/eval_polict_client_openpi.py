@@ -326,6 +326,9 @@ def main(usr_args):
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
     args["save_root"] = save_root
+    args["save_rollouts"] = bool(usr_args.get("save_rollouts", False))
+    args["rollout_save_mode"] = usr_args.get("rollout_save_mode", "failures")
+    args["rollout_save_root"] = usr_args.get("rollout_save_root")
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -798,6 +801,7 @@ def eval_policy(task_name,
                     prompt,
                     episode_info["info"],
                 )
+                TASK_ENV.remove_data_cache()
                 rollout_episode_num += 1
             else:
                 TASK_ENV.remove_data_cache()
