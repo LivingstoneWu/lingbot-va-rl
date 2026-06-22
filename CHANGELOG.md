@@ -19,10 +19,17 @@
 - `CriticTrainer.train`: writes compact `loss.jsonl` records under `output_dir/checkpoints` at `log_interval` with loss, gradient norm, and parameter norm.
 - `CriticTrainingConfig.__post_init__`: rejects non-positive `log_interval` values.
 - `workflow.md`: documents the `loss.jsonl` path and record fields.
+- `CriticTrainingConfig`: adds one-element `feature_layers`, `feature_aggregation`, selected-layer access, and normalization semantics.
+- `WanTransformer3DModel.forward_train`: optionally returns final normalized or one raw post-block action/video feature stream without changing diffusion outputs.
+- `WanTransformer3DModel.forward`: forwards the optional `critic_feature_layer` argument only through the training feature path.
+- `CriticTrainer`: validates the selected block, uses it for current/predecessor extraction, and enforces feature-spec compatibility on resume.
+- `save_critic_checkpoint`: persists layer, aggregation, and normalization in checkpoint schema version 3.
+- `critic_phase1.example.json`: exposes `feature_layers=[-1]` and `feature_aggregation="single"` defaults.
+- `DESIGN.md` / `IMPLEMENTATION.md` / `workflow.md`: define feature taps, Phase 1 restrictions, future mixing, and inference ownership.
 
 ### Verification
 
-- `PYTHONPATH=. pytest -q tests/test_rl_transitions.py tests/test_rl_critics.py tests/test_rl_config.py tests/test_rl_checkpoint.py`: 11 passed.
+- `PYTHONPATH=. pytest -q tests/test_rl_transitions.py tests/test_rl_critics.py tests/test_rl_config.py tests/test_rl_checkpoint.py`: 16 passed.
 - Direct LingBot-environment assertion: `CriticTrainer._parameter_norm` returned `5.0` for trainable parameters `[3,4]` while excluding a frozen parameter.
 
 

@@ -117,12 +117,33 @@ All pretrained LingBot parameters remain frozen during critic training:
 
 The backbone provides contextualized action-token hidden states.
 
+### Feature Layer Specification
+
+Each critic checkpoint owns one versioned feature tap:
+
+```text
+feature_layers: [-1] or [block_index]
+feature_aggregation: single
+```
+
+`feature_layers=[-1]` preserves the original behavior: action and video tokens
+are taken after all DiT blocks and final adaptive `norm_out`, before the output
+projections. A non-negative, zero-based block index selects the raw hidden
+state immediately after that DiT block, before final adaptive normalization.
+Q, online V, and target V must all use the same selected tap.
+
+Phase 1 requires exactly one layer and `feature_aggregation=single`. The list
+format reserves a stable checkpoint/config contract for later mixtures such as
+mean, learned weighted sum, or concatenation. Such mixtures require explicit
+aggregation and normalization versions; mixing final-normalized and raw block
+features is invalid unless a common normalization is defined.
+
 ### Critic Input
 
 Given a clean dataset action chunk $A_t$, run the frozen action branch at the clean endpoint using attention `chunk_size=K`, matching inference. Preserve:
 
 $$
-H_{\mathrm{act}}^L
+H_{\mathrm{act}}^\ell
 \in
 \mathbb{R}^{B \times K \times N \times d}.
 $$
@@ -132,7 +153,7 @@ The critic requires one scalar per RL chunk. Masked-mean pool all valid action h
 $$
 h_Q
 =
-\frac{\sum_{f=1}^{K}\sum_{i=1}^{N}m_{f,i}H_{\mathrm{act},f,i}^L}
+\frac{\sum_{f=1}^{K}\sum_{i=1}^{N}m_{f,i}H_{\mathrm{act},f,i}^\ell}
 {\sum_{f=1}^{K}\sum_{i=1}^{N}m_{f,i}}.
 $$
 
@@ -172,12 +193,12 @@ $$
 V_\phi(s_t).
 $$
 
-For transition $t$, extract final normalized video tokens from the previous latent chunk $Z_{t-1}$:
+For transition $t$, extract video tokens from the configured feature tap of the previous latent chunk $Z_{t-1}$:
 
 $$
 h_{V,t}
 =
-\mathrm{MaskedMeanPool}(H_{\mathrm{video}}^L(Z_{t-1})),
+\mathrm{MaskedMeanPool}(H_{\mathrm{video}}^\ell(Z_{t-1})),
 $$
 
 then:
@@ -364,8 +385,8 @@ can be computed. The frozen action DiT forward pass must not be wrapped in `torc
 
 - Identify the action flow-time convention.
 - Identify action-token positions in the unified transformer.
-- Expose final action-token hidden states.
-- Expose final normalized video-token hidden states for the value heads.
+- Expose final normalized or one raw post-block action/video feature stream.
+- Version the selected layer and normalization in critic checkpoints.
 - Verify previous-video/current-action/current-video temporal alignment.
 - Verify action chunk shape and chunk-to-environment transition alignment.
 
@@ -500,7 +521,7 @@ Policy:
     frozen LingBot action flow
 
 Critic location:
-    final action-token hidden states
+    configured final-normalized or raw post-block action/video streams
 
 Critic input:
     full LingBot context + candidate clean action chunk

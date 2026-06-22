@@ -15,6 +15,8 @@ class CriticTrainingConfig:
     critic_type: str = "twin_mlp_v1"
     transformer_path: str | None = None
     feature_dim: int = 3072
+    feature_layers: tuple[int, ...] = (-1,)
+    feature_aggregation: str = "single"
     hidden_dim: int = 512
     num_layers: int = 2
     gamma: float = 0.99
@@ -33,6 +35,21 @@ class CriticTrainingConfig:
     resume_from: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.feature_layers, (list, tuple)):
+            raise TypeError("feature_layers must be a list or tuple")
+        if any(
+            not isinstance(layer, int) or isinstance(layer, bool)
+            for layer in self.feature_layers
+        ):
+            raise TypeError("feature_layers must contain only integers")
+        object.__setattr__(self, "feature_layers", tuple(self.feature_layers))
+        if len(self.feature_layers) != 1:
+            raise ValueError("Phase 1 requires exactly one feature layer")
+        if self.feature_layers[0] < -1:
+            raise ValueError("feature layer must be -1 or non-negative")
+        if self.feature_aggregation != "single":
+            raise ValueError("feature_aggregation must be 'single'")
+
         if self.algorithm not in {"mc", "iql"}:
             raise ValueError("algorithm must be 'mc' or 'iql'")
         if self.infer_latent_chunk_size <= 0:
@@ -44,6 +61,16 @@ class CriticTrainingConfig:
         if not 0.0 < self.expectile < 1.0:
             raise ValueError("expectile must be in (0, 1)")
 
+    @property
+    def feature_layer(self) -> int:
+        return self.feature_layers[0]
+
+    @property
+    def feature_normalization(self) -> str:
+        if self.feature_layer == -1:
+            return "final_adaptive_norm_v1"
+        return "raw_block_output_v1"
+
     @classmethod
     def from_json(cls, path: str | Path) -> "CriticTrainingConfig":
         with Path(path).open() as handle:
@@ -52,6 +79,8 @@ class CriticTrainingConfig:
         unknown = sorted(set(values).difference(known))
         if unknown:
             raise ValueError(f"Unknown critic config keys: {unknown}")
+        if "feature_layers" in values:
+            values["feature_layers"] = tuple(values["feature_layers"])
         return cls(**values)
 
     def to_dict(self) -> dict[str, Any]:

@@ -10,7 +10,7 @@ from .config import CriticTrainingConfig
 from .critics import CriticBundle
 
 
-CHECKPOINT_SCHEMA_VERSION = 2
+CHECKPOINT_SCHEMA_VERSION = 3
 
 
 def save_critic_checkpoint(
@@ -40,6 +40,9 @@ def save_critic_checkpoint(
         "critic_type": config.critic_type,
         "feature_dim": config.feature_dim,
         "infer_latent_chunk_size": config.infer_latent_chunk_size,
+        "feature_layers": list(config.feature_layers),
+        "feature_aggregation": config.feature_aggregation,
+        "feature_normalization": config.feature_normalization,
         **manifest,
     }
     (output / "manifest.json").write_text(

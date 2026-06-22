@@ -194,6 +194,12 @@ class CriticTrainer:
             eval_mode=True,
         )
         self.transformer.eval().requires_grad_(False)
+        transformer_layers = len(self.transformer.blocks)
+        if config.feature_layer >= transformer_layers:
+            raise ValueError(
+                f"feature layer {config.feature_layer} is out of range for "
+                f"a transformer with {transformer_layers} blocks"
+            )
 
         self.bundle = build_critic_bundle(
             critic_type=config.critic_type,
@@ -223,6 +229,9 @@ class CriticTrainer:
                     "infer_latent_chunk_size": (
                         config.infer_latent_chunk_size
                     ),
+                    "feature_layers": list(config.feature_layers),
+                    "feature_aggregation": config.feature_aggregation,
+                    "feature_normalization": config.feature_normalization,
                 },
             )
 
@@ -254,6 +263,7 @@ class CriticTrainer:
             input_dict,
             train_mode=True,
             return_features=True,
+            critic_feature_layer=self.config.feature_layer,
         )
         features = {
             key: value.detach()
@@ -386,8 +396,16 @@ class CriticTrainer:
                 "action_per_frame": int(
                     self.base_config.action_per_frame
                 ),
-                "feature_source": "final_normalized_action_tokens_v1",
-                "video_feature_source": "final_normalized_video_tokens_v2",
+                "feature_source": (
+                    "final_normalized_action_tokens_v1"
+                    if self.config.feature_layer == -1
+                    else "raw_block_action_tokens_v1"
+                ),
+                "video_feature_source": (
+                    "final_normalized_video_tokens_v2"
+                    if self.config.feature_layer == -1
+                    else "raw_block_video_tokens_v1"
+                ),
                 "value_state_alignment": (
                     "previous_video_for_v_current_video_for_target_v"
                 ),

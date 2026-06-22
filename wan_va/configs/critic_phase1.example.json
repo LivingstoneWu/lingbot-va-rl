@@ -6,6 +6,8 @@
   "critic_type": "twin_mlp_v1",
   "infer_latent_chunk_size": 4,
   "feature_dim": 3072,
+  "feature_layers": [-1],
+  "feature_aggregation": "single",
   "hidden_dim": 512,
   "num_layers": 2,
   "gamma": 0.99,

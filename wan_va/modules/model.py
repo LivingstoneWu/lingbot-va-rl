@@ -734,22 +734,32 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         input_dict,
         jepa_capture_layer: int = -1,
         return_features: bool = False,
+        critic_feature_layer: int = -1,
     ):
         """
         Args:
             jepa_capture_layer: 0-indexed DiT layer after which to capture the
                 noisy-latent hidden states for the JEPA auxiliary loss.  Pass -1
                 (default) to skip capture.
+            critic_feature_layer: -1 selects the current final normalized
+                action/video features. A non-negative index selects the raw
+                hidden state immediately after that zero-indexed DiT block.
 
         Returns:
             (latent_hidden_states, action_hidden_states, jepa_hidden)
             jepa_hidden is None when jepa_capture_layer < 0, otherwise a tensor
             of shape [1, B*F*H_tokens*W_tokens, inner_dim] — the noisy-latent
             stream only, ready to be reshaped and projected.
-            When return_features is true, a fourth dictionary contains normalized
-            pre-output action tokens [B,F,N,D] and video tokens
-            [B,F,S,D].
+            When return_features is true, a fourth dictionary contains action
+            tokens [B,F,N,D] and video tokens [B,F,S,D] from the selected tap.
         """
+        if return_features and not (
+            -1 <= critic_feature_layer < len(self.blocks)
+        ):
+            raise ValueError(
+                "critic_feature_layer must be -1 or a valid block index; "
+                f"got {critic_feature_layer} for {len(self.blocks)} blocks"
+            )
         input_dict['latent_dict']['noisy_latents'] = input_dict['latent_dict']['noisy_latents'].to(torch.bfloat16)
         input_dict['latent_dict']['latent'] = input_dict['latent_dict']['latent'].to(torch.bfloat16)
         input_dict['action_dict']['noisy_latents'] = input_dict['action_dict']['noisy_latents'].to(torch.bfloat16)
@@ -823,6 +833,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
 
         latent_seq_total = latent_hidden_states.shape[1]  # B * F * H_tokens * W_tokens
         jepa_hidden = None
+        critic_hidden_states = None
         for i, block in enumerate(self.blocks):
             hidden_states = block(hidden_states,
                                          text_hidden_states,
@@ -832,6 +843,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
             if i == jepa_capture_layer:
                 # Noisy-latent stream is the first latent_seq_total tokens.
                 jepa_hidden = hidden_states[:, :latent_seq_total, :]
+            if return_features and i == critic_feature_layer:
+                critic_hidden_states = hidden_states
 
         temb_scale_shift_table = self.scale_shift_table[None] + temb[:, :, None, ...]
         shift, scale = rearrange(temb_scale_shift_table,
@@ -847,28 +860,43 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
 
         features = None
         if return_features:
+            feature_latent_hidden_states = latent_hidden_states
+            feature_action_hidden_states = action_hidden_states
+            if critic_feature_layer >= 0:
+                if critic_hidden_states is None:
+                    raise RuntimeError(
+                        "Requested critic feature layer was not captured"
+                    )
+                (
+                    feature_latent_hidden_states,
+                    _,
+                    feature_action_hidden_states,
+                    _,
+                    _,
+                ) = torch.split(critic_hidden_states, split_list, dim=1)
+
             latent_frames = latent_dict['noisy_latents'].shape[2]
             action_frames = action_dict['noisy_latents'].shape[2]
             if latent_frames != action_frames:
                 raise ValueError(
                     f"Latent/action frame mismatch: {latent_frames} != {action_frames}"
                 )
-            video_tokens_per_frame = latent_hidden_states.shape[1] // (
+            video_tokens_per_frame = feature_latent_hidden_states.shape[1] // (
                 batch_size * latent_frames
             )
-            action_tokens_per_frame = action_hidden_states.shape[1] // (
+            action_tokens_per_frame = feature_action_hidden_states.shape[1] // (
                 batch_size * action_frames
             )
             features = {
                 'video_tokens': rearrange(
-                    latent_hidden_states,
+                    feature_latent_hidden_states,
                     '1 (b f s) d -> b f s d',
                     b=batch_size,
                     f=latent_frames,
                     s=video_tokens_per_frame,
                 ),
                 'action_tokens': rearrange(
-                    action_hidden_states,
+                    feature_action_hidden_states,
                     '1 (b f n) d -> b f n d',
                     b=batch_size,
                     f=action_frames,
@@ -899,6 +927,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         train_mode=False,
         jepa_capture_layer: int = -1,
         return_features: bool = False,
+        critic_feature_layer: int = -1,
     ):
         r"""
         Forward pass through the diffusion model
@@ -924,6 +953,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                 input_dict,
                 jepa_capture_layer=jepa_capture_layer,
                 return_features=return_features,
+                critic_feature_layer=critic_feature_layer,
             )
         if action_mode:  # action input emb
             latent_hidden_states = rearrange(input_dict['noisy_latents'],

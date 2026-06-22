@@ -153,7 +153,10 @@ This wrapper leaves supervised flow training unchanged and keeps reward/Bellman 
 
 ### Public Contract
 
-Add `return_features: bool = False` to the relevant training/action forward paths in `wan_va/modules/model.py`.
+The relevant training/action forward paths in `wan_va/modules/model.py` expose
+`return_features: bool = False` and `critic_feature_layer: int = -1`. The new
+argument is appended with a compatibility-preserving default, so existing
+LingBot-VA callers and return values remain unchanged.
 
 Default behavior and return values must remain unchanged. When enabled, return predictions plus a structured dictionary:
 
@@ -168,13 +171,20 @@ features = {
 
 Feature requirements:
 
-- Capture final normalized transformer hidden states before `action_proj_out`.
+- `critic_feature_layer=-1` captures final adaptive-normalized transformer
+  states before `proj_out` and `action_proj_out`.
+- A non-negative index captures raw action/video streams immediately after the
+  corresponding zero-based DiT block, before final adaptive normalization.
+- Capture only the requested intermediate activation; do not retain every
+  layer output.
 - Preserve the action layout as `[B, K, N, D]` for one RL chunk.
 - Preserve latent/action masks for pooling across valid `K × N` tokens.
 - Set the training attention `chunk_size` to `infer_latent_chunk_size`, matching inference `frame_chunk_size`.
-- Return final normalized video tokens as `video_tokens`.
+- Return video tokens from the same tap as action tokens.
 - Do not detach inside the model interface; the caller controls gradient behavior.
 - Keep feature extraction numerically identical between critic training and guided inference.
+- Keep normal diffusion predictions connected to final normalized states even
+  when an intermediate critic feature is requested.
 
 ### Clean-Action Feature Timestep
 
@@ -241,7 +251,7 @@ Training responsibilities:
 1. Load a pretrained LingBot-VA checkpoint.
 2. Freeze all base-model parameters.
 3. Build chunk transitions with explicit predecessor/successor links.
-4. Extract current action/video features and previous video features.
+4. Extract current action/video features and previous video features from the configured tap.
 5. Train Q from current action tokens, online V from previous video tokens, and target V from current video tokens.
 6. Mask only first-chunk V losses while retaining their Q losses.
 7. Log losses, calibration, rankings, success/failure separation, and return distributions.
@@ -279,7 +289,9 @@ The critic training config controls training only:
 training:
   algorithm: mc  # mc | iql
   critic_type: twin_mlp_v1
-  feature_type: final_action_tokens_v1
+  feature_layers: [-1]  # -1 final normalized; 0..L-1 raw post-block
+  feature_aggregation: single
+  feature_dim: 3072
   reward_type: sparse_terminal_v1
   action_feature_sigma: 0.0
   infer_latent_chunk_size: 4  # must match inference frame_chunk_size
@@ -324,6 +336,9 @@ critic and feature component versions
 algorithm (MC or IQL)
 base-model checkpoint identity/hash
 feature dimensions and token source
+feature_layers (one element in Phase 1)
+feature_aggregation (`single` in Phase 1)
+feature_normalization (`final_adaptive_norm_v1` or `raw_block_output_v1`)
 infer_latent_chunk_size and action_per_frame
 chunk partitioning, padding, pooling, and predecessor/successor conventions
 value-state alignment version
@@ -336,6 +351,12 @@ IQL hyperparameters when applicable
 ```
 
 Loading must validate compatibility before training resumes or evaluation begins.
+
+Checkpoint schema version 3 makes the feature specification mandatory. Resume
+must reject layer, aggregation, or normalization mismatches. Later inference
+guidance must read this specification from the critic manifest instead of
+selecting a layer independently. Phase 1 rejects multiple layers; the list
+shape reserves future explicit aggregation without changing config structure.
 
 ## Later Guidance And Evaluation Pipeline
 

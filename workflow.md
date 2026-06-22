@@ -47,6 +47,13 @@ Required run choices:
   inputs. This preserves the same action horizon used at inference.
 - `feature_dim`: transformer hidden width returned by `return_features=True`;
   currently `3072` for the supplied model. Training fails early on mismatch.
+- `feature_layers`: a one-element list selecting the shared Q/V feature tap.
+  `[-1]` uses final adaptive-normalized action/video streams. `[k]` uses raw
+  streams immediately after zero-based DiT block `k`. The trainer rejects
+  negative values other than `-1`, out-of-range indices, and multiple layers.
+- `feature_aggregation`: currently must be `"single"`. This list-plus-
+  aggregation format reserves future multi-layer mixtures without changing the
+  checkpoint/config shape.
 - `window_size`: FlexAttention history limit in interleaved latent/action chunk
   positions. It is conceptually equivalent to inference `attn_window`, but the
   critic config does not inherit that base-config value. Each Phase 1 feature
@@ -125,9 +132,13 @@ Rank 0 writes:
       training_state.pt
 ```
 
-`checkpoints/loss.jsonl` records step, time, loss, gradient norm, and critic parameter norm
-at `log_interval`. Checkpoints are written at `save_interval` and once more at
-the final step.
+`checkpoints/loss.jsonl` records step, time, loss, gradient norm, and critic
+parameter norm at `log_interval`. Checkpoints are written at `save_interval`
+and once more at the final step.
+
+Each checkpoint manifest records `feature_layers`, `feature_aggregation`, and
+`feature_normalization`. Resume rejects a checkpoint whose feature tap differs
+from the current training config.
 
 To resume, create a new run config or edit the current one:
 
@@ -140,9 +151,9 @@ To resume, create a new run config or edit the current one:
 
 Keep the other fields from the complete config. Resume restores critic and
 optimizer state and rejects incompatible checkpoint schema, algorithm,
-`critic_type`, `feature_dim`, or `infer_latent_chunk_size` values. Set
-`num_steps` to the desired final global step, not the number of additional
-steps.
+`critic_type`, `feature_dim`, feature specification, or
+`infer_latent_chunk_size` values. Set `num_steps` to the desired final global
+step, not the number of additional steps.
 
 ## Preflight Checklist
 
@@ -151,6 +162,8 @@ steps.
 - `transformer_path` identifies the intended frozen model checkpoint.
 - `infer_latent_chunk_size` equals the base config's `frame_chunk_size`.
 - `feature_dim` equals the transformer's returned hidden width.
+- `feature_layers` contains one valid zero-based block index or `-1`.
+- `feature_aggregation` is `"single"`.
 - `output_dir` and `resume_from` identify the intended run.
 - For non-final storage segments, latent frame count is divisible by the chunk
   size; the final segment covers `termination_frame` when provided.
