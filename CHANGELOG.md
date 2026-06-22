@@ -4,6 +4,11 @@
 
 ### Added
 
+- `wan_va_server_q_guiding.py`: adds a separate VA server entry point that preserves the existing server interface while applying Q-gradient guidance in the action denoising loop.
+- `QGuidedVA_Server`: loads a critic checkpoint, validates chunk/action feature compatibility, and evaluates Q on clean action estimates during action sampling.
+- `QGuidanceAdapter` / `TwinMLPQGuidanceAdapter`: define the server-facing Q objective contract and current twin-Q implementation.
+- `guidance.py`: adds denoising-time scaling, clean feature-input construction, action guidance masks, Q checkpoint artifact loading, and a registry-backed guidance adapter.
+- `tests/test_rl_guidance.py`: covers denoising-time scaling, invalid/clamped action masking, Q artifact loading, and manifest mismatch rejection.
 - `workflow.md`: documents dataset preflight, base/critic config ownership, per-rank loader settings, attention-window semantics, launch commands, monitoring, and checkpoint resume behavior.
 - `extract_latent_vae_robotwin.py`: validates RobotWin camera ordering and maps the high camera to full resolution and wrist cameras to half resolution before VAE encoding.
 - `test_robotwin_latent_extraction.py`: covers valid T-shape sizes and rejects incompatible camera order, resolution, and environment configs.
@@ -16,20 +21,25 @@
 - `_prepare_clean_input`: casts floating dataset tensors to `base_config.param_dtype` before frozen-transformer feature extraction.
 - `IMPLEMENTATION.md`: documents the BF16-transformer/FP32-critic dtype path and additional changes required for full FP32 backbone support.
 - `CriticTrainer._parameter_norm`: computes the global L2 norm of trainable critic parameters for logging.
-- `CriticTrainer.train`: writes compact `loss.jsonl` records under `output_dir/checkpoints` at `log_interval` with loss, gradient norm, and parameter norm.
+- `CriticTrainer.train`: writes `total_loss`, `q_loss`, unweighted `value_loss`, gradient norm, and parameter norm to `loss.jsonl` without a legacy `loss` alias.
 - `CriticTrainingConfig.__post_init__`: rejects non-positive `log_interval` values.
-- `workflow.md`: documents the `loss.jsonl` path and record fields.
+- `workflow.md`: documents the component-loss fields and MC value-loss behavior in `loss.jsonl`.
 - `CriticTrainingConfig`: adds one-element `feature_layers`, `feature_aggregation`, selected-layer access, and normalization semantics.
 - `WanTransformer3DModel.forward_train`: optionally returns final normalized or one raw post-block action/video feature stream without changing diffusion outputs.
 - `WanTransformer3DModel.forward`: forwards the optional `critic_feature_layer` argument only through the training feature path.
 - `CriticTrainer`: validates the selected block, uses it for current/predecessor extraction, and enforces feature-spec compatibility on resume.
 - `save_critic_checkpoint`: persists layer, aggregation, and normalization in checkpoint schema version 3.
 - `critic_phase1.example.json`: exposes `feature_layers=[-1]` and `feature_aggregation="single"` defaults.
-- `DESIGN.md` / `IMPLEMENTATION.md` / `workflow.md`: define feature taps, Phase 1 restrictions, future mixing, and inference ownership.
+- `wan_va.rl.__init__`: exports the Q-guidance artifact loader and denoising/mask helpers.
+- `DESIGN.md` / `IMPLEMENTATION.md` / `workflow.md`: define feature taps, Phase 1 restrictions, future mixing, inference ownership, and first-version QGF guidance.
 
 ### Verification
 
 - `PYTHONPATH=. pytest -q tests/test_rl_transitions.py tests/test_rl_critics.py tests/test_rl_config.py tests/test_rl_checkpoint.py`: 16 passed.
+- `PYTHONPATH=. pytest -q tests/test_rl_guidance.py tests/test_rl_checkpoint.py tests/test_rl_critics.py tests/test_rl_config.py`: 16 passed.
+- `python -m py_compile wan_va/rl/guidance.py wan_va/wan_va_server_q_guiding.py tests/test_rl_guidance.py`: passed.
+- `PYTHONPATH=. pytest -q tests/test_rl_critics.py tests/test_rl_config.py`: 10 passed after extending component-loss logging.
+- `git -C /luhongchao/wy/lingbot-va-rl diff --check`: passed after removing the legacy `loss` JSONL alias.
 - Direct LingBot-environment assertion: `CriticTrainer._parameter_norm` returned `5.0` for trainable parameters `[3,4]` while excluding a frozen parameter.
 
 

@@ -132,8 +132,9 @@ Rank 0 writes:
       training_state.pt
 ```
 
-`checkpoints/loss.jsonl` records step, time, loss, gradient norm, and critic
-parameter norm at `log_interval`. Checkpoints are written at `save_interval`
+`checkpoints/loss.jsonl` records step, time, total loss, Q loss, unweighted
+value loss, gradient norm, and critic parameter norm at `log_interval`.
+For MC, `value_loss` is zero. Checkpoints are written at `save_interval`
 and once more at the final step.
 
 Each checkpoint manifest records `feature_layers`, `feature_aggregation`, and

@@ -323,30 +323,45 @@ g_\tau
 Q_{\min}(s_t,\hat A_{\mathrm{clean}}).
 $$
 
-Before adding $g_\tau$ to the flow velocity, zero gradient entries for padded positions, invalid action channels, and server-clamped `action_cond` positions. These entries either do not represent an action or will be overwritten by the server.
+Before using $g_\tau$, zero gradient entries for padded positions, invalid action channels, and server-clamped `action_cond` positions. These entries either do not represent an action or will be overwritten by the server.
 
-Normalize or clip the gradient:
+Use denoising-step-aware scaling with time descending from $1$ to $0$:
 
 $$
-\tilde g_\tau
+\rho(\tau)
 =
-\frac{g_\tau}
-{\max(\|g_\tau\|_2,\epsilon)}.
-$$
-
-Then guide the action flow:
-
-$$
-A_{\tau+\Delta \tau}
+\frac{\tau^2}{\tau^2 + (1-\tau)^2},
+\qquad
+s(\tau)
 =
-A_\tau
+\min
+\left(
+\beta,
+\frac{\tau}{(1-\tau)\rho(\tau)+\epsilon}
+\right),
+\qquad
+\beta=2.
+$$
+
+Optional gradient normalization and clipping may be applied for stability. The guided clean-action estimate is:
+
+$$
+\hat A_{\mathrm{clean}}^{\mathrm{guided}}
+=
+\hat A_{\mathrm{clean}}
 +
-\Delta\tau
-\left[
-v_\theta(s_t,A_\tau,\tau)
-+
-\lambda_{\mathrm{guide}}\tilde g_\tau
-\right].
+\lambda_{\mathrm{guide}} s(\tau) g_\tau.
+$$
+
+Since $\hat A_{\mathrm{clean}} = A_\tau-\sigma_\tau v_\theta$, the equivalent velocity correction used by the flow scheduler is:
+
+$$
+v_{\mathrm{guided}}
+=
+v_\theta
+-
+\frac{\lambda_{\mathrm{guide}}s(\tau)}{\max(\sigma_\tau,\epsilon)}
+g_\tau.
 $$
 
 The base flow preserves behavior-policy plausibility. The Q-gradient provides a conservative local preference toward higher predicted return.

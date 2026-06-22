@@ -6,13 +6,25 @@ from .critics import (
     ValueCritic,
     build_critic_bundle,
 )
+from .guidance import (
+    QGuidanceAdapter,
+    QGuidanceArtifact,
+    build_action_guidance_mask,
+    denoising_time_scaling,
+    load_q_guidance_artifact,
+)
 from .transitions import ChunkTransitionDataset
 
 __all__ = [
     "ChunkTransitionDataset",
     "CriticBundle",
     "CriticTrainingConfig",
+    "QGuidanceAdapter",
+    "QGuidanceArtifact",
     "build_critic_bundle",
+    "build_action_guidance_mask",
+    "denoising_time_scaling",
+    "load_q_guidance_artifact",
     "IQLLosses",
     "TwinQCritic",
     "ValueCritic",
@@ -20,4 +32,3 @@ __all__ = [
     "iql_losses",
     "mc_q_loss",
 ]
-

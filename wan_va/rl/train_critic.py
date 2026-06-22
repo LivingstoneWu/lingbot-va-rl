@@ -438,7 +438,9 @@ class CriticTrainer:
                         entry = {
                             "step": self.step,
                             "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                            "loss": metrics["loss"],
+                            "total_loss": metrics["loss"],
+                            "q_loss": metrics["q_loss"],
+                            "value_loss": metrics["value_loss"],
                             "grad_norm": metrics["grad_norm"],
                             "param_norm": self._parameter_norm(),
                         }

@@ -1,7 +1,7 @@
 # Phase 1 Implementation Plan: Offline Critics and Q-Guided Action Sampling
 
 **Date:** 2026-06-19
-**Status:** Critic training implemented; inference guidance planned
+**Status:** Critic training implemented; first Q-guided inference server implemented
 **Design reference:** `DESIGN.md`
 
 ## Concise Overview
@@ -358,9 +358,73 @@ guidance must read this specification from the critic manifest instead of
 selecting a layer independently. Phase 1 rejects multiple layers; the list
 shape reserves future explicit aggregation without changing config structure.
 
+## Q-Guided Flow Matching Inference
+
+The first inference implementation lives in `wan_va/wan_va_server_q_guiding.py`
+as a separate server entry point. The original `wan_va_server.py` interface and
+behavior remain unchanged. The guided server preserves reset, KV-cache, and
+response semantics, and modifies only the action generation loop.
+
+The guided action loop:
+
+1. Runs the normal action flow model to predict velocity $v_\theta$.
+2. Reconstructs the clean action estimate:
+
+```text
+clean_action = noisy_action - sigma * predicted_velocity
+```
+
+3. Evaluates the critic on `clean_action` through the same
+   `return_features=True` transformer path used during critic training.
+4. Computes the gradient of the selected Q objective with respect to
+   `clean_action`.
+5. Masks invalid action channels and server-clamped `action_cond` positions.
+6. Applies denoising-step-aware scaling:
+
+```text
+r_square = time**2 / (time**2 + (1.0 - time)**2)
+scale = min(beta, time / ((1.0 - time) * r_square + eps))
+```
+
+where `time` descends from `1` to `0` during denoising and defaults to the
+current scheduler sigma.
+7. Converts the clean-action update to a velocity update:
+
+```text
+guided_velocity = predicted_velocity - guidance_scale * scale * grad / sigma
+```
+
+Optional gradient RMS normalization and elementwise clipping are exposed as
+runtime arguments for experiments.
+
+### Guidance Checkpoint Loading
+
+`wan_va/rl/guidance.py` owns the inference artifact loader and Q-guidance
+adapter registry. The server does not construct critic modules directly.
+
+`load_q_guidance_artifact(checkpoint_dir, device)`:
+
+1. Reads `config.json` and `manifest.json` from the critic checkpoint.
+2. Validates checkpoint schema and feature-spec compatibility.
+3. Builds the registered critic type, currently `twin_mlp_v1`.
+4. Loads `training_state.pt["critic"]`.
+5. Returns a `QGuidanceArtifact` with the config, manifest, and adapter.
+
+The current adapter exposes `min`, `mean`, `q1`, and `q2` objectives from the
+twin-Q head. IQL checkpoints load the value heads for state-dict compatibility,
+but guidance uses only the Q head. Future Q module versions should be added to
+the guidance registry rather than special-cased in the server.
+
+Before inference starts, the guided server validates:
+
+- `infer_latent_chunk_size == frame_chunk_size`;
+- `action_per_frame` when present in the manifest;
+- selected feature layer is valid for the loaded transformer.
+
 ## Later Guidance And Evaluation Pipeline
 
-Guidance is an inference/evaluation concern and will be implemented after critic training is validated. It does not participate in critic optimization and is not stored in the original training config.
+Guidance is an inference/evaluation concern and does not participate in critic
+optimization or the original training config.
 
 For each evaluation experiment:
 
@@ -379,7 +443,10 @@ candidate_rerank_v1
 future advantage-based guidance
 ```
 
-The later inference implementation should use a guidance registry and validate critic/feature compatibility. Inference samples one full action field with shape `[B,C,F,N,1]`, where `F=frame_chunk_size=infer_latent_chunk_size`. The critic pools the valid hidden states across `F × N` and returns one Q value per batch item, so no per-latent Q reduction is required.
+Inference samples one full action field with shape `[B,C,F,N,1]`, where
+`F=frame_chunk_size=infer_latent_chunk_size`. The critic pools the valid hidden
+states across `F × N` and returns one Q value per batch item, so no per-latent
+Q reduction is required.
 
 Gradient guidance will enable autograd only for the candidate action path while keeping LingBot-VA parameters frozen. Before adding the gradient to the flow velocity, mask out:
 
@@ -404,7 +471,8 @@ wan_va/
     registry.py                   # validated component construction
     checkpoint.py                 # manifests and compatibility checks
     train_critic.py               # standalone training entry point
-    guidance.py                   # later evaluation phase
+    guidance.py                   # Q-guidance artifact loading and adapters
+  wan_va_server_q_guiding.py      # guided server entry point
 ```
 
 Configuration files should live with the existing configuration system unless repository conventions indicate a clearer dedicated `wan_va/configs/rl/` package during implementation.
@@ -469,4 +537,3 @@ Do not proceed to guided inference until all of the following hold:
 - Checkpoint manifests reject incompatible base models or feature specifications.
 
 Phase 1 is complete only after unguided and guided evaluation can be reproduced from a critic checkpoint plus an immutable experiment configuration and saved result directory.
-
