@@ -27,7 +27,6 @@ from wan_va.wan_va_server import (
     run_async_server_mode,
     save_async,
 )
-from wan_va.modules.model import FlexAttnFunc
 
 
 class QGuidedVA_Server(VA_Server):
@@ -104,10 +103,14 @@ class QGuidedVA_Server(VA_Server):
         sigma = self.action_scheduler.sigmas[timestep_id]
         return sigma.to(device=self.device, dtype=dtype)
 
-    @staticmethod
-    def _clear_flex_attention_masks() -> None:
-        FlexAttnFunc.attention_mask = None
-        FlexAttnFunc.cross_attention_mask = None
+    def _clear_flex_attention_masks(self) -> None:
+        for block in self.transformer.blocks:
+            attn_op = getattr(block.attn1, "attn_op", None)
+            attn_cls = type(attn_op)
+            if hasattr(attn_cls, "attention_mask"):
+                attn_cls.attention_mask = None
+            if hasattr(attn_cls, "cross_attention_mask"):
+                attn_cls.cross_attention_mask = None
 
     @contextmanager
     def _q_feature_extraction_context(self):

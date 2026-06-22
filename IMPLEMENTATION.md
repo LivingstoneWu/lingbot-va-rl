@@ -384,6 +384,9 @@ clean_action = noisy_action - sigma * predicted_velocity
    FlexAttention masks created by the feature pass are cleared afterward so
    regular cached inference does not reuse them. The guided server also clears
    FlexAttention masks immediately before normal video/action cached forwards.
+   Mask clearing is done through the loaded transformer's actual attention-op
+   class, not an imported `wan_va.modules.model.FlexAttnFunc`, because the
+   server may load the model through the top-level `modules.model` path.
 6. Masks invalid action channels and server-clamped `action_cond` positions.
 7. Applies denoising-step-aware scaling:
 

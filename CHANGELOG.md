@@ -32,7 +32,7 @@
 - `critic_phase1.example.json`: exposes `feature_layers=[-1]` and `feature_aggregation="single"` defaults.
 - `wan_va.rl.__init__`: exports the Q-guidance artifact loader and denoising/mask helpers.
 - `load_q_guidance_artifact`: accepts legacy schema-2 critic checkpoints only as final-normalized `feature_layers=[-1]` guidance artifacts.
-- `QGuidedVA_Server._q_feature_extraction_context` / `_clear_flex_attention_masks`: isolate Q feature extraction from live KV cache and clear stale FlexAttention masks before normal cached forwards.
+- `QGuidedVA_Server._q_feature_extraction_context` / `_clear_flex_attention_masks`: isolate Q feature extraction from live KV cache and clear stale FlexAttention masks through the loaded transformer's actual attention-op class before normal cached forwards.
 - `DESIGN.md` / `IMPLEMENTATION.md` / `workflow.md`: define feature taps, Phase 1 restrictions, future mixing, inference ownership, and first-version QGF guidance.
 
 ### Verification
