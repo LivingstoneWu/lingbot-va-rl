@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -26,6 +27,7 @@ from wan_va.wan_va_server import (
     run_async_server_mode,
     save_async,
 )
+from wan_va.modules.model import FlexAttnFunc
 
 
 class QGuidedVA_Server(VA_Server):
@@ -102,6 +104,30 @@ class QGuidedVA_Server(VA_Server):
         sigma = self.action_scheduler.sigmas[timestep_id]
         return sigma.to(device=self.device, dtype=dtype)
 
+    @contextmanager
+    def _q_feature_extraction_context(self):
+        attention_mask = FlexAttnFunc.attention_mask
+        cross_attention_mask = FlexAttnFunc.cross_attention_mask
+        missing = object()
+        saved_caches = []
+        for block in self.transformer.blocks:
+            caches = getattr(block.attn1, "attn_caches", None)
+            if caches is None:
+                continue
+            saved = caches.get(self.cache_name, missing)
+            saved_caches.append((caches, saved))
+            caches[self.cache_name] = None
+        try:
+            yield
+        finally:
+            for caches, saved in saved_caches:
+                if saved is missing:
+                    caches.pop(self.cache_name, None)
+                else:
+                    caches[self.cache_name] = saved
+            FlexAttnFunc.attention_mask = attention_mask
+            FlexAttnFunc.cross_attention_mask = cross_attention_mask
+
     def _q_guided_velocity(
         self,
         actions: torch.Tensor,
@@ -136,7 +162,7 @@ class QGuidedVA_Server(VA_Server):
             chunk_size=self.q_artifact.config.infer_latent_chunk_size,
             window_size=self.q_artifact.config.window_size,
         )
-        with torch.enable_grad():
+        with torch.enable_grad(), self._q_feature_extraction_context():
             outputs = self.transformer(
                 feature_input,
                 train_mode=True,

@@ -378,8 +378,12 @@ clean_action = noisy_action - sigma * predicted_velocity
    `return_features=True` transformer path used during critic training.
 4. Computes the gradient of the selected Q objective with respect to
    `clean_action`.
-5. Masks invalid action channels and server-clamped `action_cond` positions.
-6. Applies denoising-step-aware scaling:
+5. Temporarily disables the transformer's live KV cache and restores the
+   previous FlexAttention masks around the critic feature pass. This keeps Q
+   features current-chunk-only, matching critic training, without disturbing
+   the server's history cache.
+6. Masks invalid action channels and server-clamped `action_cond` positions.
+7. Applies denoising-step-aware scaling:
 
 ```text
 r_square = time**2 / (time**2 + (1.0 - time)**2)
@@ -388,7 +392,7 @@ scale = min(beta, time / ((1.0 - time) * r_square + eps))
 
 where `time` descends from `1` to `0` during denoising and defaults to the
 current scheduler sigma.
-7. Converts the clean-action update to a velocity update:
+8. Converts the clean-action update to a velocity update:
 
 ```text
 guided_velocity = predicted_velocity - guidance_scale * scale * grad / sigma
