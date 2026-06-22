@@ -382,7 +382,8 @@ clean_action = noisy_action - sigma * predicted_velocity
    feature pass. This keeps Q features current-chunk-only, matching critic
    training, without disturbing the server's history cache. Any square
    FlexAttention masks created by the feature pass are cleared afterward so
-   regular cached inference does not reuse them.
+   regular cached inference does not reuse them. The guided server also clears
+   FlexAttention masks immediately before normal video/action cached forwards.
 6. Masks invalid action channels and server-clamped `action_cond` positions.
 7. Applies denoising-step-aware scaling:
 

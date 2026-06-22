@@ -104,6 +104,11 @@ class QGuidedVA_Server(VA_Server):
         sigma = self.action_scheduler.sigmas[timestep_id]
         return sigma.to(device=self.device, dtype=dtype)
 
+    @staticmethod
+    def _clear_flex_attention_masks() -> None:
+        FlexAttnFunc.attention_mask = None
+        FlexAttnFunc.cross_attention_mask = None
+
     @contextmanager
     def _q_feature_extraction_context(self):
         missing = object()
@@ -126,8 +131,7 @@ class QGuidedVA_Server(VA_Server):
             # The training-style feature pass creates square block masks for
             # the current chunk. The regular server forward attends over its
             # live KV cache, so those masks are invalid after this context.
-            FlexAttnFunc.attention_mask = None
-            FlexAttnFunc.cross_attention_mask = None
+            self._clear_flex_attention_masks()
 
     def _q_guided_velocity(
         self,
@@ -265,6 +269,7 @@ class QGuidedVA_Server(VA_Server):
                     None,
                     frame_st_id=frame_st_id,
                 )
+                self._clear_flex_attention_masks()
                 video_noise_pred = self.transformer(
                     self._repeat_input_for_cfg(input_dict["latent_res_lst"]),
                     update_cache=1 if last_step else 0,
@@ -335,6 +340,7 @@ class QGuidedVA_Server(VA_Server):
                 frame_st_id=frame_st_id,
             )
             with torch.no_grad():
+                self._clear_flex_attention_masks()
                 action_noise_pred = self.transformer(
                     self._repeat_input_for_cfg(input_dict["action_res_lst"]),
                     update_cache=1 if last_step else 0,
