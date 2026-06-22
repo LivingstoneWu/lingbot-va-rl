@@ -387,6 +387,10 @@ clean_action = noisy_action - sigma * predicted_velocity
    Mask clearing is done through the loaded transformer's actual attention-op
    class, not an imported `wan_va.modules.model.FlexAttnFunc`, because the
    server may load the model through the top-level `modules.model` path.
+   The guided server also replaces the loaded FlexAttention class's compiled
+   `flex_attn` wrapper with raw `torch.nn.attention.flex_attention` to avoid
+   TorchInductor failures when alternating cached inference shapes and
+   Q-feature square-mask shapes.
 6. Masks invalid action channels and server-clamped `action_cond` positions.
 7. Applies denoising-step-aware scaling:
 

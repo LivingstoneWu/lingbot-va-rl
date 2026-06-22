@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
+from torch.nn.attention.flex_attention import flex_attention as raw_flex_attention
 from tqdm import tqdm
 
 from wan_va.rl.guidance import (
@@ -53,6 +54,7 @@ class QGuidedVA_Server(VA_Server):
         self.q_objective = q_objective
         self.q_grad_clip = float(q_grad_clip)
         self.q_grad_normalize = bool(q_grad_normalize)
+        self._disable_compiled_flex_attention()
         self.q_artifact = load_q_guidance_artifact(q_checkpoint, self.device)
         self._validate_q_artifact()
 
@@ -102,6 +104,13 @@ class QGuidedVA_Server(VA_Server):
         )
         sigma = self.action_scheduler.sigmas[timestep_id]
         return sigma.to(device=self.device, dtype=dtype)
+
+    def _disable_compiled_flex_attention(self) -> None:
+        for block in self.transformer.blocks:
+            attn_op = getattr(block.attn1, "attn_op", None)
+            attn_cls = type(attn_op)
+            if hasattr(attn_cls, "flex_attn"):
+                attn_cls.flex_attn = staticmethod(raw_flex_attention)
 
     def _clear_flex_attention_masks(self) -> None:
         for block in self.transformer.blocks:
