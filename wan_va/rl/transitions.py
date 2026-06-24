@@ -40,6 +40,10 @@ class ChunkTransitionDataset(Dataset):
         infer_latent_chunk_size: int,
         action_per_frame: int,
         gamma: float = 0.99,
+        reward_source: str = "sparse_success",
+        include_sparse_success_reward: bool = False,
+        jepa_reward_weight: float = 1.0,
+        success_reward_weight: float = 1.0,
         require_outcomes: bool = True,
         include_previous: bool = True,
     ) -> None:
@@ -49,6 +53,11 @@ class ChunkTransitionDataset(Dataset):
             raise ValueError("action_per_frame must be positive")
         if not 0.0 <= gamma <= 1.0:
             raise ValueError("gamma must be in [0, 1]")
+        if reward_source not in {"sparse_success", "jepa_delta_distance"}:
+            raise ValueError(
+                "reward_source must be 'sparse_success' or "
+                "'jepa_delta_distance'"
+            )
         if not hasattr(base_dataset, "get_rl_segment_metadata"):
             raise TypeError(
                 "base_dataset must implement get_rl_segment_metadata(idx)"
@@ -58,6 +67,10 @@ class ChunkTransitionDataset(Dataset):
         self.chunk_size = infer_latent_chunk_size
         self.action_per_frame = action_per_frame
         self.gamma = gamma
+        self.reward_source = reward_source
+        self.include_sparse_success_reward = include_sparse_success_reward
+        self.jepa_reward_weight = float(jepa_reward_weight)
+        self.success_reward_weight = float(success_reward_weight)
         self.include_previous = include_previous
         self.records = self._build_records(require_outcomes=require_outcomes)
 
@@ -108,6 +121,11 @@ class ChunkTransitionDataset(Dataset):
                     valid_frames = min(
                         self.chunk_size, frame_count - frame_start
                     )
+                    reward = self._base_reward(
+                        segment,
+                        frame_start=frame_start,
+                        valid_frames=valid_frames,
+                    )
                     records.append(
                         ChunkRecord(
                             dataset_idx=int(segment["dataset_idx"]),
@@ -115,7 +133,7 @@ class ChunkTransitionDataset(Dataset):
                             rl_chunk_idx=chunk_index,
                             frame_start=frame_start,
                             valid_frames=valid_frames,
-                            reward=0.0,
+                            reward=reward,
                             done=False,
                             truncated=False,
                             discount=self.gamma
@@ -134,7 +152,11 @@ class ChunkTransitionDataset(Dataset):
                 records[index] = ChunkRecord(
                     **{
                         **record.__dict__,
-                        "reward": float(success and is_terminal),
+                        "reward": self._final_reward(
+                            record.reward,
+                            success=success,
+                            is_terminal=is_terminal,
+                        ),
                         "done": is_terminal,
                         "truncated": bool(truncated and is_terminal),
                         "discount": 0.0 if is_terminal else record.discount,
@@ -156,6 +178,49 @@ class ChunkTransitionDataset(Dataset):
                     **{**record.__dict__, "mc_return": running_return}
                 )
         return records
+
+    def _base_reward(
+        self,
+        segment: dict[str, Any],
+        frame_start: int,
+        valid_frames: int,
+    ) -> float:
+        if self.reward_source == "sparse_success":
+            return 0.0
+        reward_config = segment.get("reward_config")
+        if not isinstance(reward_config, dict):
+            raise ValueError(
+                "Missing reward_config for reward_source='jepa_delta_distance'"
+            )
+        if reward_config.get("reward_source") != "jepa_delta_distance":
+            raise ValueError(
+                "reward_config.reward_source must be 'jepa_delta_distance'"
+            )
+        rewards = reward_config.get("latent_rewards")
+        if not isinstance(rewards, list):
+            raise ValueError("reward_config.latent_rewards must be a list")
+        reward_end = frame_start + valid_frames
+        if reward_end > len(rewards):
+            raise ValueError(
+                "reward_config.latent_rewards is shorter than the segment's "
+                "latent frame count"
+            )
+        return self.jepa_reward_weight * float(
+            sum(float(value) for value in rewards[frame_start:reward_end])
+        )
+
+    def _final_reward(
+        self,
+        base_reward: float,
+        success: bool,
+        is_terminal: bool,
+    ) -> float:
+        sparse_reward = float(success and is_terminal)
+        if self.reward_source == "sparse_success":
+            return self.success_reward_weight * sparse_reward
+        if self.include_sparse_success_reward:
+            return base_reward + self.success_reward_weight * sparse_reward
+        return base_reward
 
     @staticmethod
     def _validate_segments(
@@ -275,4 +340,3 @@ class ChunkTransitionDataset(Dataset):
                 }
             )
         return result
-

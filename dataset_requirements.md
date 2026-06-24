@@ -31,3 +31,23 @@ No latent or Parquet reconversion is required. Update each episode record in `me
 - Existing episode fields, including `action_config`, must be preserved.
 - The final available `action_config` segment must cover `termination_frame` when that field is present.
 - Write valid JSON Lines: one complete JSON object per line.
+
+## Optional JEPA Delta Rewards
+
+For dense JEPA reward training, each `action_config` entry must include:
+
+```json
+{
+  "reward_config": {
+    "reward_source": "jepa_delta_distance",
+    "distance_metric": "cosine",
+    "goal_episode_index": 12,
+    "goal_selection": "self_success",
+    "latent_rewards": [0.1, -0.02, 0.0],
+    "distance_to_goal": [1.2, 1.1, 1.12]
+  }
+}
+```
+
+`latent_rewards` must contain one scalar per latent frame in that action_config
+entry. Critic training sums these rewards over each inference-sized RL chunk.

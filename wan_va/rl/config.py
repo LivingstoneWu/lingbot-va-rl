@@ -20,6 +20,10 @@ class CriticTrainingConfig:
     hidden_dim: int = 512
     num_layers: int = 2
     gamma: float = 0.99
+    reward_source: str = "sparse_success"
+    include_sparse_success_reward: bool = False
+    jepa_reward_weight: float = 1.0
+    success_reward_weight: float = 1.0
     expectile: float = 0.7
     value_loss_weight: float = 1.0
     target_ema_rate: float = 0.005
@@ -52,6 +56,14 @@ class CriticTrainingConfig:
 
         if self.algorithm not in {"mc", "iql"}:
             raise ValueError("algorithm must be 'mc' or 'iql'")
+        if self.reward_source not in {
+            "sparse_success",
+            "jepa_delta_distance",
+        }:
+            raise ValueError(
+                "reward_source must be 'sparse_success' or "
+                "'jepa_delta_distance'"
+            )
         if self.infer_latent_chunk_size <= 0:
             raise ValueError("infer_latent_chunk_size must be positive")
         if self.log_interval <= 0:
@@ -85,4 +97,3 @@ class CriticTrainingConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-

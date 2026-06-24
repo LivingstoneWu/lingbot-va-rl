@@ -29,7 +29,7 @@ Guidance is not part of critic training configuration. Later, the evaluation pip
 - Updating LingBot-VA parameters with RL objectives.
 - Online RL or rollout collection.
 - Video-side critics or video-flow guidance.
-- Dense learned rewards.
+- Learned dense rewards.
 - Guidance configuration in the critic training config.
 - Production deployment of guided inference.
 
@@ -110,6 +110,42 @@ discount = 0 if done, otherwise gamma ** valid_environment_actions_in_chunk
 ```
 
 A failed terminal chunk has `reward=0` and `done=true`. A partial terminal chunk may be padded to K latent frames, but its latent and action masks must exclude padding from feature pooling and losses.
+
+Dense JEPA delta-distance rewards are optional and precomputed by
+`preprocessing/add_jepa_delta_rewards.py`. The script reads episode-level JEPA
+feature maps, compares dense patch features to a selected goal feature map, and
+writes raw per-latent rewards into each `action_config` entry:
+
+```text
+latent_reward[j] = distance_to_goal[j] - distance_to_goal[j + 1]
+```
+
+The final latent reward is zero because it has no successor latent state. Critic
+training sums `latent_rewards` over the selected RL chunk, so reward annotation
+does not depend on `infer_latent_chunk_size`.
+
+Successful trajectories use their own final JEPA state as the goal. Failed
+trajectories use the closest final JEPA state among successful trajectories.
+Critic training selects the reward source with readable config keys:
+
+```json
+{
+  "reward_source": "jepa_delta_distance",
+  "include_sparse_success_reward": true,
+  "jepa_reward_weight": 1.0,
+  "success_reward_weight": 1.0
+}
+```
+
+The final scalar reward is:
+
+```text
+reward = jepa_reward_weight * jepa_delta_reward
+       + success_reward_weight * sparse_success_reward
+```
+
+when `include_sparse_success_reward=true`; otherwise only the selected reward
+source is used.
 
 Each transition should expose:
 

@@ -97,3 +97,28 @@ def test_config_rejects_invalid_feature_layer_and_aggregation():
             infer_latent_chunk_size=4,
             feature_aggregation="mean",
         )
+
+
+def test_config_validates_reward_source():
+    config = CriticTrainingConfig(
+        base_config_name="demo_train",
+        output_dir="out",
+        infer_latent_chunk_size=4,
+        reward_source="jepa_delta_distance",
+        include_sparse_success_reward=True,
+        jepa_reward_weight=0.5,
+        success_reward_weight=2.0,
+    )
+
+    assert config.reward_source == "jepa_delta_distance"
+    assert config.include_sparse_success_reward
+    assert config.jepa_reward_weight == 0.5
+    assert config.success_reward_weight == 2.0
+
+    with pytest.raises(ValueError, match="reward_source"):
+        CriticTrainingConfig(
+            base_config_name="demo_train",
+            output_dir="out",
+            infer_latent_chunk_size=4,
+            reward_source="unknown",
+        )

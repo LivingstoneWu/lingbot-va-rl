@@ -43,4 +43,5 @@ VA_CONFIGS = {
     'rc_aloha_base_config': rc_aloha_base_config,
     'va_robotwin_jepatrain_full_cfg': va_robotwin_jepatrain_full_cfg,
     'robotwin_qgf_v1_cfg_place_can_basket_generated': robotwin_qgf_v1_cfg_place_can_basket_generated,
+    'robotwin_qgf_v1_cfg_place_can_basket_200rollout_50successGenerated': robotwin_qgf_v1_cfg_place_can_basket_200rollout_50successGenerated,
 }

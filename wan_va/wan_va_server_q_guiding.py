@@ -41,6 +41,7 @@ class QGuidedVA_Server(VA_Server):
         q_guidance_beta: float = 2.0,
         q_guidance_start_step: int = 0,
         q_guidance_end_step: int = -1,
+        q_guidance_interval: int = 1,
         q_objective: str = "min",
         q_grad_clip: float = 0.0,
         q_grad_normalize: bool = False,
@@ -51,10 +52,12 @@ class QGuidedVA_Server(VA_Server):
         self.q_guidance_beta = float(q_guidance_beta)
         self.q_guidance_start_step = int(q_guidance_start_step)
         self.q_guidance_end_step = int(q_guidance_end_step)
+        if q_guidance_interval <= 0:
+            raise ValueError("q_guidance_interval must be positive")
+        self.q_guidance_interval = int(q_guidance_interval)
         self.q_objective = q_objective
         self.q_grad_clip = float(q_grad_clip)
         self.q_grad_normalize = bool(q_grad_normalize)
-        self._disable_compiled_flex_attention()
         self.q_artifact = load_q_guidance_artifact(q_checkpoint, self.device)
         self._validate_q_artifact()
 
@@ -90,6 +93,8 @@ class QGuidedVA_Server(VA_Server):
             return False
         if self.q_guidance_end_step >= 0 and step_index > self.q_guidance_end_step:
             return False
+        if (step_index - self.q_guidance_start_step) % self.q_guidance_interval:
+            return False
         return True
 
     def _scheduler_sigma(
@@ -105,12 +110,31 @@ class QGuidedVA_Server(VA_Server):
         sigma = self.action_scheduler.sigmas[timestep_id]
         return sigma.to(device=self.device, dtype=dtype)
 
-    def _disable_compiled_flex_attention(self) -> None:
+    def _flex_attention_classes(self) -> set[type]:
+        classes = set()
         for block in self.transformer.blocks:
             attn_op = getattr(block.attn1, "attn_op", None)
             attn_cls = type(attn_op)
             if hasattr(attn_cls, "flex_attn"):
-                attn_cls.flex_attn = staticmethod(raw_flex_attention)
+                classes.add(attn_cls)
+        return classes
+
+    @contextmanager
+    def _raw_flex_attention_context(self):
+        saved = {
+            attn_cls: attn_cls.__dict__.get("flex_attn")
+            for attn_cls in self._flex_attention_classes()
+        }
+        for attn_cls in saved:
+            attn_cls.flex_attn = staticmethod(raw_flex_attention)
+        try:
+            yield
+        finally:
+            for attn_cls, flex_attn in saved.items():
+                if flex_attn is None:
+                    delattr(attn_cls, "flex_attn")
+                else:
+                    attn_cls.flex_attn = flex_attn
 
     def _clear_flex_attention_masks(self) -> None:
         for block in self.transformer.blocks:
@@ -179,7 +203,11 @@ class QGuidedVA_Server(VA_Server):
             chunk_size=self.q_artifact.config.infer_latent_chunk_size,
             window_size=self.q_artifact.config.window_size,
         )
-        with torch.enable_grad(), self._q_feature_extraction_context():
+        with (
+            torch.enable_grad(),
+            self._q_feature_extraction_context(),
+            self._raw_flex_attention_context(),
+        ):
             outputs = self.transformer(
                 feature_input,
                 train_mode=True,
@@ -456,6 +484,7 @@ def run(args):
         q_guidance_beta=args.q_guidance_beta,
         q_guidance_start_step=args.q_guidance_start_step,
         q_guidance_end_step=args.q_guidance_end_step,
+        q_guidance_interval=args.q_guidance_interval,
         q_objective=args.q_objective,
         q_grad_clip=args.q_grad_clip,
         q_grad_normalize=args.q_grad_normalize,
@@ -492,6 +521,7 @@ def main():
     parser.add_argument("--q_guidance_beta", type=float, default=2.0)
     parser.add_argument("--q_guidance_start_step", type=int, default=0)
     parser.add_argument("--q_guidance_end_step", type=int, default=-1)
+    parser.add_argument("--q_guidance_interval", type=int, default=1)
     parser.add_argument(
         "--q_objective",
         type=str,

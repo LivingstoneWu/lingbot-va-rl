@@ -26,7 +26,7 @@ mkdir -p "$LOG_DIR"
 
 # ── parse our own flags, collect the rest as passthrough ─────────────────────
 DATASETS_ROOT=""
-CHECKPOINT="/liujinxin/weights/vjepa2.1/vjepa2_1_vitG_384.pt"
+CHECKPOINT="/luhongchao/shared/weights/vjepa2.1/vjepa2_1_vitG_384.pt"
 NPROC=1
 PASSTHROUGH=()   # forwarded verbatim to extract_jepa_features.py
 

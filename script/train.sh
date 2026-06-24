@@ -4,7 +4,7 @@ set -x
 
 umask 007
 
-cd /luhongchao/wy/lingbot-va
+cd /luhongchao/wy/lingbot-va-rl
 source /luhongchao/anaconda3/bin/activate lingbot
  
 NGPU=${NGPU:-"8"}
@@ -12,7 +12,7 @@ MASTER_PORT=${MASTER_PORT:-"29504"}
 PORT=${PORT:-"1109"}
 LOG_RANK=${LOG_RANK:-"0"}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
-CONFIG_NAME=${CONFIG_NAME:-"rc_aloha_base_config"}
+CONFIG_NAME=${CONFIG_NAME:-"robotwin_qgf_v1_cfg_place_can_basket_generated"}
 
 overrides=""
 if [ $# -ne 0 ]; then

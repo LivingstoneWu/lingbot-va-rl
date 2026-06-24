@@ -4,7 +4,7 @@
 
 This phase adds **offline value estimation and test-time action guidance** to a pretrained LingBot-VA world-action model.
 
-The base model is first trained normally on the target task distribution using its original video and action flow-matching objectives. It is then frozen. A small double-Q critic and value head are trained on top of frozen action-branch representations using offline IQL and sparse terminal success reward.
+The base model is first trained normally on the target task distribution using its original video and action flow-matching objectives. It is then frozen. A small double-Q critic and value head are trained on top of frozen action-branch representations using offline IQL and configurable rewards.
 
 At inference, the critic does not update the base policy. Instead, its gradient with respect to the predicted clean action chunk is added to the action flow velocity during sampling. The goal is to improve generated action chunks while preserving the pretrained policy as a strong behavior prior.
 
@@ -19,7 +19,7 @@ This phase intentionally excludes video-side Q learning and video-flow guidance.
 - Task-SFT/pretraining of LingBot-VA using the existing training pipeline.
 - Frozen LingBot-VA backbone during critic training.
 - Offline chunk-level IQL critic training.
-- Sparse terminal success reward.
+- Sparse terminal success reward and optional precomputed JEPA delta-distance reward.
 - Test-time Q-guided action flow sampling.
 - Action-side critic attached to frozen action-DiT hidden states.
 
@@ -30,7 +30,6 @@ This phase intentionally excludes video-side Q learning and video-flow guidance.
 - Joint RL fine-tuning of the LingBot backbone.
 - Online rollout collection or online policy updates.
 - Learned dense progress reward.
-- Goal-image embedding / latent-distance reward shaping.
 
 These may be added only after Phase 1 is stable and evaluated.
 
@@ -90,7 +89,7 @@ $$
 
 The action-branch hidden state for $Q(s_t,A_t)$ may use the current action/video chunk $(A_t,Z_t)$. The state-only value function must not use $Z_t$ for $V(s_t)$, because $Z_t$ already encodes information about the current action outcome.
 
-For Phase 1:
+For sparse-success training:
 
 $$
 r_t =
@@ -101,6 +100,48 @@ r_t =
 $$
 
 The discount is $\Gamma_t=\gamma^{H_t}$, where $H_t$ is the number of valid environment actions represented by the chunk. The training `infer_latent_chunk_size` must match inference `frame_chunk_size`.
+
+For dense JEPA reward training, preprocessing computes dense patchwise cosine
+distance from each state to a goal state:
+
+$$
+D_t
+=
+\mathrm{mean}_{c,h,w}
+\left[
+1-\cos
+\left(
+F_{t,c,h,w},
+G_{c,h,w}
+\right)
+\right].
+$$
+
+Successful trajectories use their own final JEPA feature map as $G$. Failed
+trajectories choose the closest successful final feature map as $G$. The
+per-latent reward is progress toward the goal between adjacent latent states:
+
+$$
+r_j^{\mathrm{JEPA}}
+=
+D_j
+-
+D_{j+1}.
+$$
+
+The final latent reward is zero. For an inference-sized RL chunk, the transition
+reward is the sum of the per-latent rewards inside that chunk.
+
+Training may use either sparse success reward or JEPA delta reward. When sparse
+success is included with JEPA reward:
+
+$$
+r_t
+=
+\alpha r_t^{\mathrm{JEPA}}
++
+\beta r_t^{\mathrm{success}}.
+$$
 
 ---
 

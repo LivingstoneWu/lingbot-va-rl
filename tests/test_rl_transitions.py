@@ -86,6 +86,60 @@ def test_failed_terminal_chunk_has_zero_return():
     assert dataset.records[-1].reward == 0.0
 
 
+def test_jepa_delta_rewards_are_loaded_and_discounted():
+    class DenseRewardDataset(FakeLatentDataset):
+        def __init__(self):
+            super().__init__(success=False)
+            self.metadata["reward_config"] = {
+                "reward_source": "jepa_delta_distance",
+                "latent_rewards": [0.2, -0.1, 0.5, 0.7, -0.2],
+            }
+
+    dataset = ChunkTransitionDataset(
+        DenseRewardDataset(),
+        infer_latent_chunk_size=2,
+        action_per_frame=3,
+        gamma=0.5,
+        reward_source="jepa_delta_distance",
+    )
+
+    assert [record.reward for record in dataset.records] == [
+        pytest.approx(0.1),
+        pytest.approx(1.2),
+        pytest.approx(-0.2),
+    ]
+    assert dataset.records[-1].discount == 0.0
+    assert math.isclose(dataset.records[1].mc_return, 1.2 + 0.5**6 * -0.2)
+    assert math.isclose(
+        dataset.records[0].mc_return,
+        0.1 + 0.5**6 * dataset.records[1].mc_return,
+    )
+
+
+def test_jepa_delta_reward_can_include_sparse_success():
+    class DenseRewardDataset(FakeLatentDataset):
+        def __init__(self):
+            super().__init__(success=True)
+            self.metadata["reward_config"] = {
+                "reward_source": "jepa_delta_distance",
+                "latent_rewards": [0.2, 0.3, 0.4, 0.5, 0.6],
+            }
+
+    dataset = ChunkTransitionDataset(
+        DenseRewardDataset(),
+        infer_latent_chunk_size=2,
+        action_per_frame=3,
+        reward_source="jepa_delta_distance",
+        include_sparse_success_reward=True,
+        jepa_reward_weight=2.0,
+        success_reward_weight=3.0,
+    )
+
+    assert dataset.records[0].reward == pytest.approx(1.0)
+    assert dataset.records[1].reward == pytest.approx(1.8)
+    assert dataset.records[2].reward == pytest.approx(4.2)
+
+
 def test_nonfinal_partial_chunk_is_rejected():
     class MisalignedSegments(FakeLatentDataset):
         def __len__(self):
@@ -115,4 +169,3 @@ def test_missing_success_label_is_rejected():
             infer_latent_chunk_size=2,
             action_per_frame=3,
         )
-

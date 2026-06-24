@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/luhongchao/shared/dataset/robotwin_rl_converted/place_can_basket_robotwin_generated_100"
+ROOT="/luhongchao/shared/dataset/robotwin_converted/lingbot_rollout/place_can_basket/place_can_basket_lingbot_rollouts"
 NPROC=40
 
 find "$ROOT" -type d -name videos -print0 |

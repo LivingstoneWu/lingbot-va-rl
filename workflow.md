@@ -14,6 +14,87 @@ fields and validation rules.
 The base VA config selected below must point to this dataset and its matching
 text embeddings, latent layout, camera keys, and action layout.
 
+### Optional JEPA Feature Extraction
+
+For JEPA dense rewards, first extract V-JEPA features aligned to the VAE latent
+timeline. The extractor reads LeRobot videos and writes one feature file per
+episode:
+
+```text
+<dataset_root>/jepa/chunk-000/episode_000000.pt
+```
+
+Each file stores raw dense per-camera JEPA tokens, plus sampled `frame_ids`.
+Do not pool these features during extraction; reward annotation and diagnostics
+consume the saved dense tensors.
+
+Single dataset:
+
+```bash
+PYTHONPATH=. python preprocessing/extract_jepa_features.py \
+  --dataset-root /path/to/lerobot_dataset \
+  --checkpoint /luhongchao/shared/weights/vjepa2.1/vjepa2_1_vitG_384.pt \
+  --target-fps 12.5 \
+  --camera-keys observation.images.cam_high \
+                observation.images.cam_left_wrist \
+                observation.images.cam_right_wrist \
+  --batch-size 1 \
+  --skip-existing
+```
+
+All datasets under a parent directory:
+
+```bash
+bash preprocessing/extract_jepa_all.sh \
+  --datasets-root /luhongchao/shared/dataset/robotwin_converted/lerobot_robotwin_eef_clean_50 \
+  --checkpoint /luhongchao/shared/weights/vjepa2.1/vjepa2_1_vitG_384.pt \
+  --nproc 1 \
+  --target-fps 12.5 \
+  --camera-keys observation.images.cam_high \
+                observation.images.cam_left_wrist \
+                observation.images.cam_right_wrist \
+  --batch-size 1 \
+  --skip-existing
+```
+
+For the current RobotWin layout, `extract_jepa_features.py` already defaults
+to the correct V-JEPA repo `/luhongchao/wy/vjepa2`, checkpoint
+`/luhongchao/shared/weights/vjepa2.1/vjepa2_1_vitG_384.pt`, target FPS `12.5`,
+and native camera resolutions: high camera `256x320`, wrist cameras `128x160`.
+Keep `--target-fps` matched to the VAE latent extraction FPS; changing it breaks
+the simple frame-index alignment used by the dataset loader.
+
+To inspect whether terminal-state JEPA distance is a useful progress signal:
+
+```bash
+PYTHONPATH=. python script/jepa_oracle_goal_progress.py \
+  --dataset-root /path/to/lerobot_dataset \
+  --output-dir /path/to/jepa_distance_analysis/<dataset_name> \
+  --seed 0 \
+  --sample-count 20
+```
+
+The diagnostic saves `jepa_oracle_goal_progress.png` and
+`jepa_oracle_goal_progress_stats.json`. The plot contains raw terminal-goal
+JEPA distance, per-step distance delta, and the delta histogram.
+
+### JEPA Reward Annotation
+
+After JEPA extraction, annotate rewards:
+
+```bash
+PYTHONPATH=. python preprocessing/add_jepa_delta_rewards.py \
+  --dataset-root /path/to/lerobot_dataset \
+  --camera-keys observation.images.cam_high \
+                observation.images.cam_left_wrist \
+                observation.images.cam_right_wrist
+```
+
+The script writes raw per-latent `jepa_delta_distance` rewards into each
+`action_config.reward_config`. Critic training sums those latent rewards over
+the configured inference-sized RL chunk and applies the configured reward
+weights later.
+
 ## 2. Select the Base VA Config
 
 Set `base_config_name` to a key registered in `VA_CONFIGS` in
@@ -68,6 +149,12 @@ RL objective:
 
 - `gamma` discounts each low-level action; a chunk discount is
   `gamma ** (valid_frames * action_per_frame)`.
+- `reward_source` selects `sparse_success` or precomputed
+  `jepa_delta_distance`.
+- `include_sparse_success_reward`, `jepa_reward_weight`, and
+  `success_reward_weight` control whether dense JEPA rewards are combined with
+  the terminal success reward:
+  `reward = jepa_reward_weight * jepa_delta + success_reward_weight * success`.
 - `expectile`, `value_loss_weight`, and `target_ema_rate` affect IQL only.
 - In IQL, Q uses current action tokens, online V uses the previous video chunk,
   and target V uses the current video chunk. The first chunk has no predecessor,

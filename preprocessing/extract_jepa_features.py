@@ -84,7 +84,7 @@ from tqdm import tqdm
 # ── repo path wiring ──────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT  = SCRIPT_DIR.parent
-VJEPA_ROOT = REPO_ROOT / 'vjepa2'
+VJEPA_ROOT = REPO_ROOT.parent / 'vjepa2'
 for _p in (str(VJEPA_ROOT), str(REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -196,7 +196,7 @@ def read_frames(video_path: str,
 
     if total_frames <= 0 or orig_fps <= 0:
         cap.release()
-        return np.empty((0, height, width, 3), dtype=np.uint8), np.empty(0, dtype=np.int64)
+        return read_frames_pyav(video_path, target_fps, height, width)
 
     # ── replicate extract_latent_vae.py episode-level sampling exactly ────────
     step = max(1, int(orig_fps / target_fps)) if target_fps < orig_fps else 1
@@ -243,9 +243,60 @@ def read_frames(video_path: str,
     cap.release()
 
     if not frames:
-        return np.empty((0, height, width, 3), dtype=np.uint8), np.empty(0, dtype=np.int64)
+        return read_frames_pyav(video_path, target_fps, height, width)
 
     return np.stack(frames, axis=0), np.array(frame_ids, dtype=np.int64)   # [N,H,W,3], [N]
+
+
+def read_frames_pyav(video_path: str,
+                     target_fps: float,
+                     height: int,
+                     width: int) -> tuple[np.ndarray, np.ndarray]:
+    """Software decode fallback for codecs OpenCV cannot decode, e.g. AV1."""
+    try:
+        import av
+    except ImportError:
+        return (
+            np.empty((0, height, width, 3), dtype=np.uint8),
+            np.empty(0, dtype=np.int64),
+        )
+
+    try:
+        with av.open(video_path) as container:
+            stream = container.streams.video[0]
+            orig_fps = float(stream.average_rate) if stream.average_rate else 0.0
+            decoded = [
+                frame.to_ndarray(format='rgb24')
+                for frame in container.decode(stream)
+            ]
+    except Exception:
+        return (
+            np.empty((0, height, width, 3), dtype=np.uint8),
+            np.empty(0, dtype=np.int64),
+        )
+
+    total_frames = len(decoded)
+    if total_frames <= 0 or orig_fps <= 0:
+        return (
+            np.empty((0, height, width, 3), dtype=np.uint8),
+            np.empty(0, dtype=np.int64),
+        )
+
+    step = max(1, int(orig_fps / target_fps)) if target_fps < orig_fps else 1
+    target_count = int(total_frames / step)
+    adjusted_count = target_count
+    if (adjusted_count - 1) % 4 != 0:
+        adjusted_count = ((adjusted_count - 1) // 4) * 4 + 1
+    if adjusted_count > target_count:
+        adjusted_count -= 4
+    adjusted_count = max(adjusted_count, 1)
+
+    frame_ids = np.linspace(0, total_frames - 1, adjusted_count, dtype=int)
+    frames = [
+        cv2.resize(decoded[int(fid)], (width, height), interpolation=cv2.INTER_CUBIC)
+        for fid in frame_ids
+    ]
+    return np.stack(frames, axis=0), frame_ids.astype(np.int64)
 
 
 def frames_to_tensor(frames: np.ndarray) -> torch.Tensor:
@@ -590,7 +641,7 @@ def main() -> None:
     parser.add_argument('--dataset-root',  required=True,
                         help='Single dataset root (contains videos/) OR a parent '
                              'directory whose subtree contains multiple such roots.')
-    parser.add_argument('--checkpoint',    default="/liujinxin/weights/vjepa2.1/vjepa2_1_vitG_384.pt",
+    parser.add_argument('--checkpoint',    default="/luhongchao/shared/weights/vjepa2.1/vjepa2_1_vitG_384.pt",
                         help='Path to vjepa2.1 .pt checkpoint file')
     parser.add_argument('--camera-keys',   nargs='+', default=None,
                         help='Camera sub-directory names under videos/chunk-NNN/. '

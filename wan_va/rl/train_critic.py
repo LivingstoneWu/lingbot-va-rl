@@ -157,6 +157,12 @@ class CriticTrainer:
             infer_latent_chunk_size=config.infer_latent_chunk_size,
             action_per_frame=action_per_frame,
             gamma=config.gamma,
+            reward_source=config.reward_source,
+            include_sparse_success_reward=(
+                config.include_sparse_success_reward
+            ),
+            jepa_reward_weight=config.jepa_reward_weight,
+            success_reward_weight=config.success_reward_weight,
             require_outcomes=True,
             include_previous=config.algorithm == "iql",
         )
@@ -409,7 +415,12 @@ class CriticTrainer:
                 "value_state_alignment": (
                     "previous_video_for_v_current_video_for_target_v"
                 ),
-                "reward": "sparse_terminal_success_v1",
+                "reward_source": self.config.reward_source,
+                "include_sparse_success_reward": (
+                    self.config.include_sparse_success_reward
+                ),
+                "jepa_reward_weight": self.config.jepa_reward_weight,
+                "success_reward_weight": self.config.success_reward_weight,
             },
         )
 
@@ -479,4 +490,3 @@ def main() -> None:
 if __name__ == "__main__":
     init_logger()
     main()
-
