@@ -169,3 +169,33 @@ def test_missing_success_label_is_rejected():
             infer_latent_chunk_size=2,
             action_per_frame=3,
         )
+
+
+def test_phase3_online_reward_loads_optional_jepa_and_next_chunk():
+    class Phase3Dataset(FakeLatentDataset):
+        def __init__(self):
+            super().__init__(success=False)
+            self.sample["jepa_target"] = torch.arange(5 * 2 * 1 * 4.0).view(
+                5, 2, 1, 4
+            )
+            self.sample["jepa_available"] = torch.tensor(True)
+
+    dataset = ChunkTransitionDataset(
+        Phase3Dataset(),
+        infer_latent_chunk_size=2,
+        action_per_frame=3,
+        reward_source="negative_predicted_actual_jepa_distance",
+        include_next=True,
+    )
+
+    first = dataset[0]
+    assert first["reward"].item() == 0.0
+    assert first["jepa_target"].shape == (2, 2, 1, 4)
+    assert first["next_latents"].flatten().tolist() == [2.0, 3.0]
+    assert first["next_jepa_target"].shape == (2, 2, 1, 4)
+    assert first["next_state_valid"]
+
+    terminal = dataset[2]
+    assert not terminal["next_state_valid"]
+    assert not terminal["next_latents"].any()
+    assert not terminal["next_jepa_target"].any()

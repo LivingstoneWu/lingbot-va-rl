@@ -465,6 +465,7 @@ class QGuidedVA_Server(VA_Server):
 def run(args):
     config = VA_CONFIGS[args.config_name]
     config.wan22_finetuned_model_name_or_path = args.eval_model_path
+    config.attn_mode = args.attn_mode
 
     port = config.port if args.port is None else args.port
     if args.save_root is not None:
@@ -516,6 +517,13 @@ def main():
     parser.add_argument("--save_root", type=str, default=None)
     parser.add_argument("--eval_model_path", type=str, default=None)
     parser.add_argument("--robotwin", action="store_true")
+    parser.add_argument(
+        "--attn_mode",
+        type=str,
+        default="torch",
+        choices=("flex", "torch", "flashattn"),
+        help="Transformer attention backend. Torch is the default inference fallback; flex enables the custom masked path when supported.",
+    )
     parser.add_argument("--q_checkpoint", type=str, required=True)
     parser.add_argument("--q_guidance_scale", type=float, default=0.0)
     parser.add_argument("--q_guidance_beta", type=float, default=2.0)

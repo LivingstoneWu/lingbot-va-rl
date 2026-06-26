@@ -12,7 +12,7 @@ MASTER_PORT=${MASTER_PORT:-"29504"}
 PORT=${PORT:-"1109"}
 LOG_RANK=${LOG_RANK:-"0"}
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
-CONFIG_NAME=${CONFIG_NAME:-"robotwin_qgf_v1_cfg_place_can_basket_generated"}
+CONFIG_NAME=${CONFIG_NAME:-"robotwin_place_can_basket_official_dataset"}
 
 overrides=""
 if [ $# -ne 0 ]; then

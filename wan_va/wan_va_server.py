@@ -47,6 +47,7 @@ class VA_Server:
         self.save_root = job_config.save_root
         self.dtype = job_config.param_dtype
         self.device = torch.device(f"cuda:{job_config.local_rank}")
+        self.attn_mode = getattr(job_config, "attn_mode", "torch")
         self.enable_offload = getattr(job_config, 'enable_offload', True)  # offload vae & text_encoder to save vram
 
         # Per-job accumulators: collect latent and action tensors from every
@@ -94,7 +95,9 @@ class VA_Server:
                          'transformer'),
             torch_dtype=self.dtype,
             torch_device=self.device,
+            attn_mode=self.attn_mode,
         )
+        logger.info(f"Loaded transformer with attn_mode={self.attn_mode}")
         shard_fn = shard_model
         self.transformer = _configure_model(model=self.transformer,
                                             shard_fn=shard_fn,
@@ -1010,6 +1013,7 @@ def run(args):
     config = VA_CONFIGS[args.config_name]
     ### added by lhc
     config.wan22_finetuned_model_name_or_path = args.eval_model_path
+    config.attn_mode = args.attn_mode
 
     port = config.port if args.port is None else args.port
     if args.save_root is not None:
@@ -1069,6 +1073,13 @@ def main():
     parser.add_argument(
         "--robotwin",
         action='store_true',
+    )
+    parser.add_argument(
+        "--attn_mode",
+        type=str,
+        default="torch",
+        choices=("flex", "torch", "flashattn"),
+        help="Transformer attention backend. Torch is the default inference fallback; flex enables the custom masked path when supported.",
     )
     args = parser.parse_args()
     run(args)

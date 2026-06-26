@@ -122,3 +122,39 @@ def test_config_validates_reward_source():
             infer_latent_chunk_size=4,
             reward_source="unknown",
         )
+
+
+def test_phase3_config_requires_predicted_distribution():
+    config = CriticTrainingConfig(
+        base_config_name="demo_train",
+        output_dir="out",
+        infer_latent_chunk_size=2,
+        algorithm="iql",
+        reward_source="negative_predicted_actual_jepa_distance",
+        training_distribution="predicted_video_conditioned_action",
+        phase3_q_feature_timestep=0.0,
+        phase3_v_feature_timestep=0.5,
+    )
+
+    assert config.training_distribution == "predicted_video_conditioned_action"
+    assert config.reward_source == "negative_predicted_actual_jepa_distance"
+    assert config.phase3_v_feature_timestep == 0.5
+
+    with pytest.raises(ValueError, match="training_distribution"):
+        CriticTrainingConfig(
+            base_config_name="demo_train",
+            output_dir="out",
+            infer_latent_chunk_size=2,
+            algorithm="iql",
+            reward_source="negative_predicted_actual_jepa_distance",
+        )
+
+    with pytest.raises(ValueError, match="currently requires algorithm='iql'"):
+        CriticTrainingConfig(
+            base_config_name="demo_train",
+            output_dir="out",
+            infer_latent_chunk_size=2,
+            algorithm="mc",
+            reward_source="negative_predicted_actual_jepa_distance",
+            training_distribution="predicted_video_conditioned_action",
+        )

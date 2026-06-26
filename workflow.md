@@ -266,7 +266,12 @@ PYTHONPATH=. python -m wan_va.wan_va_server_q_guiding \
 ```
 
 Use the same `--config-name`, `--eval_model_path`, `--port`, `--save_root`,
-and `--robotwin` meanings as the unguided server. Q-specific arguments are:
+`--robotwin`, and `--attn_mode` meanings as the unguided server. Attention mode
+defaults to `torch` for cluster compatibility. Pass `--attn_mode flex` to use
+the custom masked flex-attention path on clusters where PyTorch Inductor lowers
+it reliably. `torch` does not currently implement the same custom block-mask
+semantics as flex, so use flex for final masked-path comparisons when available.
+Q-specific arguments are:
 
 - `--q_checkpoint`: critic checkpoint directory containing `config.json`,
   `manifest.json`, and `training_state.pt`.
@@ -335,3 +340,63 @@ that the server clamps after every scheduler step.
   feature tap as the target inference server config.
 - For non-final storage segments, latent frame count is divisible by the chunk
   size; the final segment covers `termination_frame` when provided.
+
+## Phase 3 Online JEPA Critic Training
+
+Phase 3 uses a separate entry point because it generates video and action
+chunks online before training the critic:
+
+```bash
+cd /luhongchao/wy/lingbot-va-rl
+bash script/train_critic_phase3_place_can_basket_online_jepa_8gpu.sh
+```
+
+The default config is:
+
+```text
+wan_va/rl_configs/qgf_phase3_robotwin_place_can_basket_200rollout_50success_online_jepa.json
+```
+
+Important keys:
+
+- `training_distribution`: selects the feature distribution for critic
+  training. `clean_dataset` is the Phase 1/2 path, where Q/V features come
+  from clean dataset video/action tensors. `predicted_video_conditioned_action`
+  is the Phase 3 path, where Q features come from generated actions conditioned
+  on generated current video plus real history.
+- `reward_source`: must be `negative_predicted_actual_jepa_distance`.
+- `phase3_video_exec_step=-1`: run full video denoising; do not use
+  partially denoised video features.
+- `phase3_q_feature_timestep=0.0`: use clean `t=0` generated-action features
+  for Q. The current action is conditioned on generated current video.
+- `phase3_v_feature_timestep=0.0`: use clean `t=0` real-video state features
+  for V. Online V pools the previous real-video chunk; target V pools the
+  current real-video chunk.
+- `phase3_video_num_inference_steps` / `phase3_action_num_inference_steps`:
+  override the base config's denoising loop lengths for online critic training.
+- `phase3_jepa_checkpoint`: V-JEPA checkpoint used to encode predicted decoded
+  frames; actual targets are loaded from cached dataset JEPA files.
+
+Phase 3 is substantially slower than Phase 1/2 critic training. Each optimizer
+step runs frozen video denoising, frozen action denoising, VAE decode, V-JEPA
+encoding, and critic updates. Start with the provided per-rank `batch_size=1`.
+
+Per-batch Phase 3 dataflow:
+
+```text
+1. Load current RL chunk and previous real chunk.
+2. Generate current video latents from previous real video history.
+3. Generate current action latents conditioned on previous real history and
+   current generated video.
+4. Decode generated video latents, encode them with V-JEPA, and compare to the
+   cached actual JEPA target for the current chunk.
+5. Set reward = -jepa_reward_weight * mean_jepa_distance.
+6. Train Q on current generated-action hidden states.
+7. Train V on previous real-video hidden states.
+8. Bootstrap Q target with target-V on current real-video hidden states.
+```
+
+The Phase 3 checkpoint manifest records `training_distribution`, reward source,
+feature timesteps, JEPA checkpoint, and value-state alignment. Do not use a
+Phase 1/2 critic checkpoint as a Phase 3 critic unless its manifest explicitly
+matches these fields.

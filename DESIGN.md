@@ -604,3 +604,75 @@ Backbone update:
 Video-side RL:
     excluded in Phase 1
 ```
+
+## Phase 3: Predicted-Video Critic Training
+
+`training_distribution` names the feature distribution used to train the
+critic. Phase 1/2 use `clean_dataset`: video/action tensors are loaded directly
+from the offline dataset and the critic sees clean dataset-conditioned hidden
+states. Phase 3 uses `predicted_video_conditioned_action`: the current video
+chunk is generated online by the frozen LingBot video flow, and Q is trained on
+action hidden states from the action flow conditioned on that generated video.
+
+The Phase 3 transition is:
+
+```text
+history real video/action chunks
+        + current generated video chunk
+        + current generated action chunk
+        -> Q feature for current action
+
+last real video chunk
+        -> V(s_t)
+
+current real video chunk
+        -> target V(s_{t+1})
+```
+
+This means Phase 3 intentionally uses different feature sources for Q and V:
+
+- Q is on the inference-like distribution: action tokens attend to real history
+  plus the current generated video.
+- V is a state baseline over real video states: current online V pools the last
+  real chunk; the Bellman target pools the current real chunk.
+- The first chunk has no previous real state, so its V loss is masked, while its
+  Q loss is still trained.
+
+The first Phase 3 implementation extracts Q and V from clean feature passes:
+
+```text
+phase3_q_feature_timestep = 0.0
+phase3_v_feature_timestep = 0.0
+```
+
+These keys are explicit because later experiments may train critics from
+partially denoised feature taps. The first experiment keeps them at zero.
+
+The Phase 3 dense reward is online:
+
+$$
+r_t = -\alpha \cdot d_{JEPA}(\hat{x}_t, x_t)
+$$
+
+where $d_{JEPA}$ is the mean dense patchwise JEPA cosine distance between
+decoded predicted frames and cached actual JEPA targets for the same latent
+chunk. Optional sparse terminal success can be added separately, but the first
+Phase 3 config uses only the negative JEPA distance.
+
+For batched training, Phase 3 packs `previous real chunk + current chunk` along
+the frame dimension and uses the existing training-style mask. During video
+generation, the current video stream is noisy/generated and the previous video
+stream is clean history. During action generation, the current action stream is
+noisy/generated and the current video condition is the generated video, not the
+ground-truth current video. The mask lets current action tokens attend to real
+history and current generated-video condition tokens, while preventing access to
+same-block current ground-truth video/action condition tokens. This avoids the
+server's linear KV-cache loop and allows chunks to be parallelized in a batch.
+
+Full video denoising is required for the first Phase 3 experiment:
+
+```text
+phase3_video_exec_step = -1
+```
+
+This disables LingBot's partial-video-denoise path for critic training.

@@ -44,4 +44,5 @@ VA_CONFIGS = {
     'va_robotwin_jepatrain_full_cfg': va_robotwin_jepatrain_full_cfg,
     'robotwin_qgf_v1_cfg_place_can_basket_generated': robotwin_qgf_v1_cfg_place_can_basket_generated,
     'robotwin_qgf_v1_cfg_place_can_basket_200rollout_50successGenerated': robotwin_qgf_v1_cfg_place_can_basket_200rollout_50successGenerated,
+    'robotwin_place_can_basket_official_dataset': robotwin_place_can_basket_official_dataset,
 }

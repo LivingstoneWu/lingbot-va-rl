@@ -33,6 +33,12 @@ class ChunkTransitionDataset(Dataset):
         "actions_mask": 1,
         "latents_mask": 0,
     }
+    _OPTIONAL_FRAME_DIMS = {
+        "jepa_target": 0,
+    }
+    _OPTIONAL_KEYS = {
+        "jepa_available",
+    }
 
     def __init__(
         self,
@@ -46,6 +52,7 @@ class ChunkTransitionDataset(Dataset):
         success_reward_weight: float = 1.0,
         require_outcomes: bool = True,
         include_previous: bool = True,
+        include_next: bool = False,
     ) -> None:
         if infer_latent_chunk_size <= 0:
             raise ValueError("infer_latent_chunk_size must be positive")
@@ -53,10 +60,15 @@ class ChunkTransitionDataset(Dataset):
             raise ValueError("action_per_frame must be positive")
         if not 0.0 <= gamma <= 1.0:
             raise ValueError("gamma must be in [0, 1]")
-        if reward_source not in {"sparse_success", "jepa_delta_distance"}:
+        if reward_source not in {
+            "sparse_success",
+            "jepa_delta_distance",
+            "negative_predicted_actual_jepa_distance",
+        }:
             raise ValueError(
-                "reward_source must be 'sparse_success' or "
-                "'jepa_delta_distance'"
+                "reward_source must be 'sparse_success', "
+                "'jepa_delta_distance', or "
+                "'negative_predicted_actual_jepa_distance'"
             )
         if not hasattr(base_dataset, "get_rl_segment_metadata"):
             raise TypeError(
@@ -72,6 +84,7 @@ class ChunkTransitionDataset(Dataset):
         self.jepa_reward_weight = float(jepa_reward_weight)
         self.success_reward_weight = float(success_reward_weight)
         self.include_previous = include_previous
+        self.include_next = include_next
         self.records = self._build_records(require_outcomes=require_outcomes)
 
     def _build_records(self, require_outcomes: bool) -> list[ChunkRecord]:
@@ -187,6 +200,8 @@ class ChunkTransitionDataset(Dataset):
     ) -> float:
         if self.reward_source == "sparse_success":
             return 0.0
+        if self.reward_source == "negative_predicted_actual_jepa_distance":
+            return 0.0
         reward_config = segment.get("reward_config")
         if not isinstance(reward_config, dict):
             raise ValueError(
@@ -218,6 +233,10 @@ class ChunkTransitionDataset(Dataset):
         sparse_reward = float(success and is_terminal)
         if self.reward_source == "sparse_success":
             return self.success_reward_weight * sparse_reward
+        if self.reward_source == "negative_predicted_actual_jepa_distance":
+            if self.include_sparse_success_reward:
+                return base_reward + self.success_reward_weight * sparse_reward
+            return base_reward
         if self.include_sparse_success_reward:
             return base_reward + self.success_reward_weight * sparse_reward
         return base_reward
@@ -287,6 +306,16 @@ class ChunkTransitionDataset(Dataset):
                     self.chunk_size,
                     self._FRAME_DIMS[key],
                 )
+            elif key in self._OPTIONAL_FRAME_DIMS:
+                chunk[key] = self._slice_and_pad(
+                    value,
+                    record.frame_start,
+                    record.valid_frames,
+                    self.chunk_size,
+                    self._OPTIONAL_FRAME_DIMS[key],
+                )
+            elif key in self._OPTIONAL_KEYS:
+                chunk[key] = value
             elif key == "text_emb":
                 chunk[key] = value
 
@@ -338,5 +367,24 @@ class ChunkTransitionDataset(Dataset):
                     f"previous_{key}": value
                     for key, value in previous_chunk.items()
                 }
+            )
+        if self.include_next:
+            if record.next_record_idx is None:
+                next_chunk = {
+                    key: torch.zeros_like(value)
+                    for key, value in current.items()
+                }
+            else:
+                next_chunk = self._load_record(
+                    self.records[record.next_record_idx]
+                )
+            result.update(
+                {
+                    f"next_{key}": value
+                    for key, value in next_chunk.items()
+                }
+            )
+            result["next_state_valid"] = torch.tensor(
+                record.next_record_idx is not None, dtype=torch.bool
             )
         return result

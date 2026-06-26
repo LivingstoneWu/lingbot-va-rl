@@ -4,6 +4,9 @@
 
 ### Added
 
+- `train_critic_phase3.py`: adds Phase 3 generated-video-conditioned IQL critic training with online negative predicted-vs-actual JEPA reward.
+- `qgf_phase3_robotwin_place_can_basket_200rollout_50success_online_jepa.json`: configures the first Phase 3 online JEPA critic experiment with full video denoising and clean `t=0` Q/V feature taps.
+- `train_critic_phase3_place_can_basket_online_jepa_8gpu.sh`: launches Phase 3 online JEPA critic training with an 8-process torchrun default.
 - `robotwin_qgf_v1_cfg_place_can_basket_200rollout_50successGenerated`: registers the combined `place_can_basket` rollout-plus-clean-success dataset for RL critic feature extraction.
 - `qgf_phase1_robotwin_place_can_basket_200rollout_50success_jepa.json`: adds an IQL critic training config using JEPA delta-distance rewards plus optional sparse terminal success reward.
 - `train_critic_place_can_basket_jepa_8gpu.sh`: launches the JEPA-reward IQL critic config with an 8-process torchrun default and cluster-friendly node overrides.
@@ -23,6 +26,10 @@
 
 ### Changed
 
+- `CriticTrainingConfig`: adds Phase 3 distribution, reward, denoising-step, clean feature timestep, and JEPA checkpoint controls.
+- `ChunkTransitionDataset`: carries optional cached JEPA targets and optional next chunks for generated-distribution critic training.
+- `Phase3CriticTrainer._train_batch`: uses previous real-video hidden states for online `V(s_t)`, current real-video hidden states for target `V(s_{t+1})`, and current generated-video-conditioned action hidden states for Q.
+- `DESIGN.md` / `IMPLEMENTATION.md` / `workflow.md`: expand Phase 3 documentation with `training_distribution` semantics, Q/V/reward dataflow, mask assumptions, and method-level implementation mapping.
 - `CriticTrainingConfig`: adds readable reward controls `reward_source`, `include_sparse_success_reward`, `jepa_reward_weight`, and `success_reward_weight`.
 - `ChunkTransitionDataset`: sums precomputed per-latent `jepa_delta_distance` rewards over each RL chunk and supports optional sparse terminal success addition while preserving sparse-success defaults.
 - `CriticTrainer`: passes reward settings into transition construction and records them in checkpoint manifests.
@@ -48,6 +55,8 @@
 - `QGuidedVA_Server._q_feature_extraction_context` / `_clear_flex_attention_masks`: isolate Q feature extraction from live KV cache and clear stale FlexAttention masks through the loaded transformer's actual attention-op class before normal cached forwards.
 - `QGuidedVA_Server._raw_flex_attention_context`: uses raw FlexAttention only during Q feature extraction and restores compiled FlexAttention for normal cached denoising.
 - `QGuidedVA_Server._should_apply_q_guidance`: supports `q_guidance_interval` to skip expensive Q-gradient passes on intermediate action denoising steps.
+- `wan_va_server.py` / `wan_va_server_q_guiding.py`: add `--attn_mode {flex,torch,flashattn}`, pass it into `load_transformer`, and log the loaded attention backend.
+- `wan_va_server.py` / `wan_va_server_q_guiding.py`: default inference `--attn_mode` to `torch`; flex attention is now opt-in with `--attn_mode flex`.
 - `jepa_oracle_goal_progress.py`: adds a raw terminal-goal JEPA distance-vs-time panel alongside the progress-delta and delta-histogram panels.
 - `jepa_oracle_goal_progress.py`: crops per-camera JEPA tensors to their shared minimum time length when an episode has camera-length mismatch, and records affected episodes in the stats JSON.
 - `jepa_oracle_goal_progress.py`: adds the task/dataset name as the figure-level title for easier browsing of copied plot collections.

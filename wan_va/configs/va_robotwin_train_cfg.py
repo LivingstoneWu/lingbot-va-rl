@@ -100,6 +100,9 @@ va_robotwin_jepatrain_full_cfg.num_steps = 50000
 # va_robotwin_jepatrain_full_cfg.num_steps = 22000
 va_robotwin_jepatrain_full_cfg.save_root = './checkpoints/robotwin_full_jepa/bs32_lr1e-5'
 
+
+
+
 # COMMENT: RL configs
 robotwin_qgf_v1_cfg_place_can_basket_generated = EasyDict(__name__='Config: VA robotwin train')
 robotwin_qgf_v1_cfg_place_can_basket_generated.update(va_robotwin_jepatrain10_cfg)
@@ -114,11 +117,25 @@ robotwin_qgf_v1_cfg_place_can_basket_generated.learning_rate = 1e-5
 robotwin_qgf_v1_cfg_place_can_basket_generated.min_lr = 1e-5
 robotwin_qgf_v1_cfg_place_can_basket_generated.save_interval = 1000
 robotwin_qgf_v1_cfg_place_can_basket_generated.max_latent_frames = 68
-robotwin_qgf_v1_cfg_place_can_basket_generated.batch_size = 1
+robotwin_qgf_v1_cfg_place_can_basket_generated.batch_size = 2
 robotwin_qgf_v1_cfg_place_can_basket_generated.jepa_loss_enabled = False
 robotwin_qgf_v1_cfg_place_can_basket_generated.gradient_accumulation_steps = 1
-robotwin_qgf_v1_cfg_place_can_basket_generated.num_steps = 5000
-robotwin_qgf_v1_cfg_place_can_basket_generated.save_root = './checkpoints/robotwin_generated_100_validation/bs8_lr1e-5'
+robotwin_qgf_v1_cfg_place_can_basket_generated.num_steps = 10000
+robotwin_qgf_v1_cfg_place_can_basket_generated.save_root = './checkpoints/robotwin_generated_100_validation/bs16_lr1e-5'
+
+robotwin_place_can_basket_official_dataset = EasyDict(__name__='Config: VA robotwin train')
+robotwin_place_can_basket_official_dataset.update(robotwin_qgf_v1_cfg_place_can_basket_generated)
+robotwin_place_can_basket_official_dataset.dataset_path = "/luhongchao/shared/dataset/robotwin_converted/lingbot_official_place_can_basket"
+robotwin_place_can_basket_official_dataset.wan22_pretrained_model_name_or_path = "/luhongchao/shared/weights/lingbot-va-posttrain-robotwin"
+robotwin_place_can_basket_official_dataset.batch_size = 1
+robotwin_place_can_basket_official_dataset.gradient_accumulation_steps = 2
+robotwin_place_can_basket_official_dataset.num_steps = 10000
+robotwin_place_can_basket_official_dataset.min_lr = 3e-6
+robotwin_place_can_basket_official_dataset.save_root = './checkpoints/posttrain_official_dataset_place_can_basket/bs16_lr1e-5'
+robotwin_place_can_basket_official_dataset.norm_stat = {
+    "q01": [-0.30003312, -0.3138428, 0.87322855, 0.65376788, -0.27025825, -0.047022339, -0.10308055, 0.01576671, -0.3860966, 0.87763625, 0.0043548741, -0.65071458, -0.44845328, -0.74115753, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "q99": [-0.023393035, 0.091135211, 1.112532, 0.99992442, 0.10347752, 0.70785922, 0.72107124, 0.33953321, 0.084412366, 1.224782, 0.7524699, 0.70665616, 0.32905793, 0.99893397, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+}
 
 robotwin_qgf_v1_cfg_place_can_basket_200rollout_50successGenerated = EasyDict(__name__='Config: VA robotwin train')
 robotwin_qgf_v1_cfg_place_can_basket_200rollout_50successGenerated.update(robotwin_qgf_v1_cfg_place_can_basket_generated)

@@ -24,6 +24,15 @@ class CriticTrainingConfig:
     include_sparse_success_reward: bool = False
     jepa_reward_weight: float = 1.0
     success_reward_weight: float = 1.0
+    training_distribution: str = "clean_dataset"
+    phase3_video_exec_step: int = -1
+    phase3_q_feature_timestep: float = 0.0
+    phase3_v_feature_timestep: float = 0.0
+    phase3_video_num_inference_steps: int | None = None
+    phase3_action_num_inference_steps: int | None = None
+    phase3_jepa_checkpoint: str = (
+        "/luhongchao/shared/weights/vjepa2.1/vjepa2_1_vitG_384.pt"
+    )
     expectile: float = 0.7
     value_loss_weight: float = 1.0
     target_ema_rate: float = 0.005
@@ -56,14 +65,55 @@ class CriticTrainingConfig:
 
         if self.algorithm not in {"mc", "iql"}:
             raise ValueError("algorithm must be 'mc' or 'iql'")
+        if self.training_distribution not in {
+            "clean_dataset",
+            "predicted_video_conditioned_action",
+        }:
+            raise ValueError(
+                "training_distribution must be 'clean_dataset' or "
+                "'predicted_video_conditioned_action'"
+            )
         if self.reward_source not in {
             "sparse_success",
             "jepa_delta_distance",
+            "negative_predicted_actual_jepa_distance",
         }:
             raise ValueError(
-                "reward_source must be 'sparse_success' or "
-                "'jepa_delta_distance'"
+                "reward_source must be 'sparse_success', "
+                "'jepa_delta_distance', or "
+                "'negative_predicted_actual_jepa_distance'"
             )
+        if (
+            self.training_distribution
+            == "predicted_video_conditioned_action"
+            and self.reward_source
+            != "negative_predicted_actual_jepa_distance"
+        ):
+            raise ValueError(
+                "Phase 3 predicted-video training requires "
+                "reward_source='negative_predicted_actual_jepa_distance'"
+            )
+        if self.reward_source == "negative_predicted_actual_jepa_distance":
+            if (
+                self.training_distribution
+                != "predicted_video_conditioned_action"
+            ):
+                raise ValueError(
+                    "negative_predicted_actual_jepa_distance requires "
+                    "training_distribution='predicted_video_conditioned_action'"
+                )
+            if self.algorithm != "iql":
+                raise ValueError("Phase 3 currently requires algorithm='iql'")
+        if not 0.0 <= self.phase3_q_feature_timestep <= 1.0:
+            raise ValueError("phase3_q_feature_timestep must be in [0, 1]")
+        if not 0.0 <= self.phase3_v_feature_timestep <= 1.0:
+            raise ValueError("phase3_v_feature_timestep must be in [0, 1]")
+        for key, value in (
+            ("phase3_video_num_inference_steps", self.phase3_video_num_inference_steps),
+            ("phase3_action_num_inference_steps", self.phase3_action_num_inference_steps),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{key} must be positive when set")
         if self.infer_latent_chunk_size <= 0:
             raise ValueError("infer_latent_chunk_size must be positive")
         if self.log_interval <= 0:

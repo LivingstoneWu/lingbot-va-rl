@@ -603,3 +603,129 @@ Do not proceed to guided inference until all of the following hold:
 - Checkpoint manifests reject incompatible base models or feature specifications.
 
 Phase 1 is complete only after unguided and guided evaluation can be reproduced from a critic checkpoint plus an immutable experiment configuration and saved result directory.
+
+## Phase 3 Implementation Notes
+
+Phase 3 is implemented as a separate trainer:
+
+```text
+wan_va/rl/train_critic_phase3.py
+```
+
+It is intentionally separate from `train_critic.py` because it runs frozen
+online generation inside critic training:
+
+```text
+dataset chunk
+  -> generate current video with frozen video flow
+  -> generate current action with frozen action flow conditioned on generated video
+  -> decode generated video and encode it with V-JEPA
+  -> reward = -mean(predicted JEPA distance to cached actual JEPA target)
+  -> train IQL Q/V heads
+```
+
+### Config Ownership
+
+`training_distribution` is the high-level switch for critic feature semantics:
+
+```text
+clean_dataset
+    Phase 1/2 path. Q/V features come from clean offline dataset tensors.
+
+predicted_video_conditioned_action
+    Phase 3 path. Q features come from generated-action hidden states
+    conditioned on generated current video and real history.
+```
+
+Phase 3 requires:
+
+```json
+{
+  "training_distribution": "predicted_video_conditioned_action",
+  "reward_source": "negative_predicted_actual_jepa_distance",
+  "algorithm": "iql"
+}
+```
+
+`phase3_video_exec_step=-1` means full video denoising, including the final
+clean step. `phase3_q_feature_timestep=0.0` and
+`phase3_v_feature_timestep=0.0` select clean feature passes for the first
+experiment.
+
+### Transition Inputs
+
+`ChunkTransitionDataset` remains a view over `LatentLeRobotDataset`, but Phase
+3 enables two optional fields:
+
+```text
+jepa_target / jepa_available
+    cached actual V-JEPA targets loaded from the dataset
+
+next_*
+    optional successor chunk tensors, available for future diagnostics and
+    alternate bootstrapping paths
+```
+
+The current Phase 3 IQL implementation does not generate the next chunk online
+for target V. Target V uses the current real video chunk, because that is the
+next state's last-real-video state under the corrected Phase 3 definition.
+
+### Method Map
+
+```text
+_predict_video
+    Packs previous real video with a noisy current video chunk.
+    Runs the frozen video flow to produce current generated video latents.
+
+_predict_actions
+    Packs previous real video/action with current generated video and noisy
+    current action. Runs the frozen action flow to produce current generated
+    action latents.
+
+_extract_clean_features
+    Runs a clean feature pass over previous real history plus current generated
+    video/action. Returns:
+      previous_video_tokens -> online V(s_t)
+      action_tokens         -> Q(s_t, a_t)
+
+_extract_real_current_video_features
+    Runs a clean feature pass over previous real history plus current real
+    video/action. Returns current real video tokens for target V(s_{t+1}).
+
+_predicted_jepa_target
+    Splits RobotWin T-shape latents back into cameras, decodes with the VAE,
+    encodes decoded frames with V-JEPA, aligns V-JEPA tokens to VAE latent
+    frames, concatenates cameras, and 2x2-pools to the DiT token grid.
+
+_train_batch
+    Computes online reward, Q, V, target V, IQL losses, logs metrics, and
+    updates only the critic bundle.
+```
+
+### Attention And Masking
+
+Phase 3 does not call the server's KV-cache inference loop. Instead it uses the
+training `forward_train` path and packs two chunks along the frame dimension:
+
+```text
+previous real chunk + current chunk
+```
+
+This keeps the computation batchable. The intended semantics are:
+
+```text
+Q action tokens may attend to:
+  previous real video/action history
+  current generated video condition
+  current generated action stream according to the normal training mask
+
+Q action tokens must not attend to:
+  current ground-truth video condition
+  current ground-truth action condition
+  future chunks
+  padded invalid tokens
+```
+
+This is the first batch-parallel approximation of inference-time conditioning.
+It should be validated with shape checks, reward-scale checks, and short dry
+runs before long cluster training.
